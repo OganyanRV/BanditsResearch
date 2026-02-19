@@ -1,0 +1,158 @@
+"""CLI launcher for scenario-based bandit benchmark (pandas input)."""
+
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from pathlib import Path
+from typing import Callable
+
+import pandas as pd
+
+from bandit_benchmark import (
+    Action,
+    CatBoostPolicy,
+    EpsilonGreedyPolicy,
+    ScenarioConfig,
+    ThompsonSamplingPolicy,
+    UCBPolicy,
+    default_five_scenarios,
+    make_simulated_environment,
+    preprocess_bandit_dataframe,
+    run_scenarios,
+    split_train_test_by_date,
+)
+
+
+def load_dataset(path: str) -> pd.DataFrame:
+    ext = Path(path).suffix.lower()
+    if ext == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+def make_empirical_ctr_scorer(train_df: pd.DataFrame) -> Callable[[pd.Series, Action], float]:
+    clicks = defaultdict(float)
+    shows = defaultdict(float)
+    for _, row in train_df.iterrows():
+        action = int(row["show"])
+        shows[action] += 1.0
+        clicks[action] += float(row["reward"])
+
+    global_ctr = (sum(clicks.values()) / sum(shows.values())) if shows else 0.01
+
+    def scorer(_row: pd.Series, action: Action) -> float:
+        n = shows.get(action, 0.0)
+        if n <= 0.0:
+            return global_ctr
+        return clicks[action] / n
+
+    return scorer
+
+
+def default_scenarios_from_args() -> list[ScenarioConfig]:
+    return default_five_scenarios()
+
+
+def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return []
+
+    output_paths: list[str] = []
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    for scenario_name, part in history_df.groupby("scenario"):
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        for algo, algo_df in part.groupby("algo"):
+            axes[0].plot(algo_df["step"], algo_df["avg_reward"], label=algo)
+            axes[1].plot(algo_df["step"], algo_df["avg_regret"], label=algo)
+
+        axes[0].set_title(f"{scenario_name}: average reward")
+        axes[0].set_xlabel("step")
+        axes[0].set_ylabel("avg_reward")
+
+        axes[1].set_title(f"{scenario_name}: average regret")
+        axes[1].set_xlabel("step")
+        axes[1].set_ylabel("avg_regret")
+
+        for ax in axes:
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+
+        out_path = str(Path(out_dir) / f"{scenario_name}.png")
+        fig.tight_layout()
+        fig.savefig(out_path)
+        plt.close(fig)
+        output_paths.append(out_path)
+
+    return output_paths
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run scenario-based benchmark for bandit policies")
+    parser.add_argument("--input", required=True, help="Path to source dataset (csv/parquet)")
+    parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument("--epsilon", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
+    parser.add_argument("--stochastic-sim", action="store_true", help="In simulation, sample Bernoulli reward")
+    parser.add_argument("--output-dir", default="artifacts")
+    args = parser.parse_args()
+
+    raw_df = load_dataset(args.input)
+    df = preprocess_bandit_dataframe(raw_df)
+    train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
+
+    scorer = make_empirical_ctr_scorer(train_df)
+    policy_factories = {
+        "epsilon_greedy": lambda: EpsilonGreedyPolicy(epsilon=args.epsilon, seed=args.seed),
+        "ucb": lambda: UCBPolicy(),
+        "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),
+        "catboost_policy": lambda: CatBoostPolicy(scorer),
+    }
+
+    env_reward = None
+    if args.simulate:
+        env_reward = make_simulated_environment(
+            proba_predictor=scorer,
+            stochastic=args.stochastic_sim,
+            seed=args.seed,
+        )
+
+    scenarios = default_scenarios_from_args()
+    result = run_scenarios(
+        train_df=train_df,
+        test_df=test_df,
+        policy_factories=policy_factories,
+        scenarios=scenarios,
+        env_reward=env_reward,
+    )
+
+    metrics_df = result["metrics"]
+    history_df = result["history"]
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = out_dir / "metrics.csv"
+    history_path = out_dir / "history.csv"
+    metrics_df.to_csv(metrics_path, index=False)
+    history_df.to_csv(history_path, index=False)
+
+    print(f"saved metrics: {metrics_path}")
+    print(f"saved history: {history_path}")
+    print(metrics_df)
+
+    plot_paths = save_plots(history_df, str(out_dir / "plots"))
+    if plot_paths:
+        print("saved plots:")
+        for p in plot_paths:
+            print(f" - {p}")
+    else:
+        print("plots were not generated (matplotlib is unavailable)")
+
+
+if __name__ == "__main__":
+    main()
