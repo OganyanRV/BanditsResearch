@@ -1,4 +1,4 @@
-"""Benchmark helpers for logged ad bandit data (pandas-first version)."""
+"""Benchmark helpers for logged ad bandit data (polars-first version)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,14 @@ import math
 import random
 from typing import Callable, Literal
 
-import pandas as pd
+import polars as pl
+
+try:
+    from tqdm import tqdm
+except Exception:  # noqa: BLE001
+    def tqdm(iterable, **kwargs):  # type: ignore
+        del kwargs
+        return iterable
 
 Action = int
 
@@ -22,15 +29,15 @@ class ScenarioConfig:
 class BasePolicy:
     can_update_online: bool = True
 
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
         raise NotImplementedError
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
 
-    def fit(self, train_df: pd.DataFrame) -> None:
-        for _, row in train_df.iterrows():
+    def fit(self, train_df: pl.DataFrame) -> None:
+        for row in train_df.iter_rows(named=True):
             self.update(int(row["show"]), float(row["reward"]), row["features_list"])
 
 
@@ -41,7 +48,7 @@ class EpsilonGreedyPolicy(BasePolicy):
         self.counts: dict[Action, int] = {}
         self.values: dict[Action, float] = {}
 
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del features, row
         if not candidates:
             raise ValueError("Empty candidate set")
@@ -64,7 +71,7 @@ class UCBPolicy(BasePolicy):
         self.counts: dict[Action, int] = {}
         self.values: dict[Action, float] = {}
 
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del features, row
         if not candidates:
             raise ValueError("Empty candidate set")
@@ -73,10 +80,7 @@ class UCBPolicy(BasePolicy):
                 return a
 
         log_t = math.log(max(self.t, 1))
-        return max(
-            candidates,
-            key=lambda a: self.values[a] + math.sqrt(self.exploration * log_t / self.counts[a]),
-        )
+        return max(candidates, key=lambda a: self.values[a] + math.sqrt(self.exploration * log_t / self.counts[a]))
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
@@ -95,14 +99,11 @@ class ThompsonSamplingPolicy(BasePolicy):
         self.alpha: dict[Action, float] = {}
         self.beta: dict[Action, float] = {}
 
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del features, row
         if not candidates:
             raise ValueError("Empty candidate set")
-        return max(
-            candidates,
-            key=lambda a: self.rng.betavariate(self.alpha.get(a, self.alpha0), self.beta.get(a, self.beta0)),
-        )
+        return max(candidates, key=lambda a: self.rng.betavariate(self.alpha.get(a, self.alpha0), self.beta.get(a, self.beta0)))
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
@@ -113,10 +114,10 @@ class ThompsonSamplingPolicy(BasePolicy):
 class CatBoostPolicy(BasePolicy):
     can_update_online = False
 
-    def __init__(self, scorer: Callable[[pd.Series, Action], float]):
+    def __init__(self, scorer: Callable[[dict[str, object], Action], float]):
         self.scorer = scorer
 
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del features
         if not candidates:
             raise ValueError("Empty candidate set")
@@ -124,7 +125,7 @@ class CatBoostPolicy(BasePolicy):
 
 
 class ContextualBanditPlaceholder(BasePolicy):
-    def select(self, candidates: list[Action], features: list[float], row: pd.Series) -> Action:
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
         raise NotImplementedError("Contextual bandits are intentionally not implemented yet")
 
@@ -141,60 +142,62 @@ def _parse_features(raw: str) -> list[float]:
     return [float(x) for x in str(raw).split("\t") if str(x) != ""]
 
 
-def preprocess_bandit_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse source dataframe:
-    - candidates: tab-separated ids -> list[int]
-    - features: tab-separated numeric values -> list[float]
-    """
+def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     req = {"policy", "reward", "puid", "features", "show", "candidates", "date"}
     missing = req - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    out = df.copy()
-    out["show"] = out["show"].astype(int)
-    out["reward"] = out["reward"].astype(float)
-    out["date"] = pd.to_datetime(out["date"])
-    out["candidates_list"] = out["candidates"].map(_parse_candidates)
-    out["features_list"] = out["features"].map(_parse_features)
+    out = df.with_columns(
+        [
+            pl.col("show").cast(pl.Int64),
+            pl.col("reward").cast(pl.Float64),
+            pl.col("date").str.to_datetime(strict=False),
+            pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
+            pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
+        ]
+    )
     return out
 
 
-def split_train_test_by_date(df: pd.DataFrame, test_ratio: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
     if not 0.0 < test_ratio < 1.0:
         raise ValueError("test_ratio must be in (0,1)")
-    ordered = df.sort_values("date").reset_index(drop=True)
-    split_idx = int(len(ordered) * (1.0 - test_ratio))
-    return ordered.iloc[:split_idx].copy(), ordered.iloc[split_idx:].copy()
+    ordered = df.sort("date")
+    split_idx = int(ordered.height * (1.0 - test_ratio))
+    return ordered.slice(0, split_idx), ordered.slice(split_idx, ordered.height - split_idx)
 
 
-def select_pretrain_data(train_df: pd.DataFrame, source: Literal["random", "all", "none"]) -> pd.DataFrame:
+def select_pretrain_data(train_df: pl.DataFrame, source: Literal["random", "all", "none"]) -> pl.DataFrame:
     if source == "none":
-        return train_df.iloc[0:0].copy()
+        return train_df.clear()
     if source == "all":
         return train_df
     if source == "random":
-        return train_df[train_df["policy"] == "random"].copy()
+        return train_df.filter(pl.col("policy") == "random")
     raise ValueError(f"Unknown pretrain source: {source}")
 
 
 def evaluate_policy(
     policy: BasePolicy,
-    test_df: pd.DataFrame,
+    test_df: pl.DataFrame,
     online_update: bool,
-    env_reward: Callable[[pd.Series, Action], float] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Returns:
-    - metrics dataframe with one row
-    - history dataframe with columns: step, reward, avg_reward, cumulative_regret, avg_regret
-    """
+    env_reward: Callable[[dict[str, object], Action], float] | None = None,
+    show_progress: bool = True,
+    progress_desc: str = "evaluate",
+    progress_position: int | None = None,
+    on_step: Callable[[str, int, pl.DataFrame], None] | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     total_reward = 0.0
     used = 0
     replay_matches = 0
     cumulative_regret = 0.0
     history_rows: list[dict[str, float | int]] = []
 
-    for step, (_, row) in enumerate(test_df.iterrows(), start=1):
+    rows = test_df.iter_rows(named=True)
+    rows_iter = tqdm(rows, total=test_df.height, desc=progress_desc, leave=False, disable=not show_progress, position=progress_position)
+
+    for step, row in enumerate(rows_iter, start=1):
         candidates = row["candidates_list"]
         features = row["features_list"]
         action = int(policy.select(candidates, features, row))
@@ -229,46 +232,50 @@ def evaluate_policy(
                 "avg_regret": cumulative_regret / used,
             }
         )
+        if on_step is not None:
+            on_step(progress_desc, step, pl.DataFrame(history_rows))
 
     ctr = total_reward / used if used else 0.0
-    match_rate = replay_matches / len(test_df) if len(test_df) else 0.0
-    metrics_df = pd.DataFrame(
-        [
-            {
-                "impressions_total": int(len(test_df)),
-                "impressions_used": int(used),
-                "total_reward": float(total_reward),
-                "ctr": float(ctr),
-                "replay_match_rate": float(match_rate),
-            }
-        ]
+    match_rate = replay_matches / test_df.height if test_df.height else 0.0
+    metrics_df = pl.DataFrame(
+        {
+            "impressions_total": [test_df.height],
+            "impressions_used": [used],
+            "total_reward": [total_reward],
+            "ctr": [ctr],
+            "replay_match_rate": [match_rate],
+        }
     )
-    history_df = pd.DataFrame(history_rows)
+    history_df = pl.DataFrame(history_rows) if history_rows else pl.DataFrame(schema={
+        "step": pl.Int64,
+        "reward": pl.Float64,
+        "avg_reward": pl.Float64,
+        "cumulative_regret": pl.Float64,
+        "avg_regret": pl.Float64,
+    })
     return metrics_df, history_df
 
 
 def run_scenarios(
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
+    train_df: pl.DataFrame,
+    test_df: pl.DataFrame,
     policy_factories: dict[str, Callable[[], BasePolicy]],
     scenarios: list[ScenarioConfig],
-    env_reward: Callable[[pd.Series, Action], float] | None = None,
-) -> dict[str, dict[str, pd.DataFrame]]:
-    """Run user-defined scenarios.
+    env_reward: Callable[[dict[str, object], Action], float] | None = None,
+    show_progress: bool = True,
+    on_step: Callable[[str, int, pl.DataFrame], None] | None = None,
+) -> dict[str, pl.DataFrame]:
+    metrics_parts: list[pl.DataFrame] = []
+    history_parts: list[pl.DataFrame] = []
 
-    Returns dict with two tables:
-    - result["metrics"]: pandas DataFrame with one row per (scenario, algo)
-    - result["history"]: pandas DataFrame with avg reward/regret curves per (scenario, algo, step)
-    """
-    metrics_rows: list[pd.DataFrame] = []
-    history_rows: list[pd.DataFrame] = []
-
-    for scenario in scenarios:
+    scenario_iter = tqdm(scenarios, desc="scenarios", disable=not show_progress)
+    for scenario in scenario_iter:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
+        algo_iter = tqdm(policy_factories.items(), desc=f"{scenario.name}/algos", leave=False, disable=not show_progress)
 
-        for algo_name, make_policy in policy_factories.items():
+        for algo_name, make_policy in algo_iter:
             policy = make_policy()
-            if len(pretrain_df) > 0:
+            if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
             metrics_df, history_df = evaluate_policy(
@@ -276,29 +283,28 @@ def run_scenarios(
                 test_df=test_df,
                 online_update=scenario.online_update,
                 env_reward=env_reward,
+                show_progress=show_progress,
+                progress_desc=f"{scenario.name}/{algo_name}",
+                on_step=on_step,
             )
-            metrics_df["scenario"] = scenario.name
-            metrics_df["algo"] = algo_name
-            metrics_rows.append(metrics_df)
+            metrics_parts.append(metrics_df.with_columns([pl.lit(scenario.name).alias("scenario"), pl.lit(algo_name).alias("algo")]))
 
-            if len(history_df) > 0:
-                history_df["scenario"] = scenario.name
-                history_df["algo"] = algo_name
-                history_rows.append(history_df)
+            if history_df.height > 0:
+                history_parts.append(history_df.with_columns([pl.lit(scenario.name).alias("scenario"), pl.lit(algo_name).alias("algo")]))
 
-    out_metrics = pd.concat(metrics_rows, ignore_index=True) if metrics_rows else pd.DataFrame()
-    out_history = pd.concat(history_rows, ignore_index=True) if history_rows else pd.DataFrame()
+    out_metrics = pl.concat(metrics_parts, how="vertical") if metrics_parts else pl.DataFrame()
+    out_history = pl.concat(history_parts, how="vertical") if history_parts else pl.DataFrame()
     return {"metrics": out_metrics, "history": out_history}
 
 
 def make_simulated_environment(
-    proba_predictor: Callable[[pd.Series, Action], float],
+    proba_predictor: Callable[[dict[str, object], Action], float],
     stochastic: bool = True,
     seed: int = 42,
-) -> Callable[[pd.Series, Action], float]:
+) -> Callable[[dict[str, object], Action], float]:
     rng = random.Random(seed)
 
-    def env_reward(row: pd.Series, action: Action) -> float:
+    def env_reward(row: dict[str, object], action: Action) -> float:
         p = max(0.0, min(1.0, float(proba_predictor(row, action))))
         if not stochastic:
             return p

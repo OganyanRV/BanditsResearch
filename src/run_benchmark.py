@@ -1,4 +1,4 @@
-"""CLI launcher for scenario-based bandit benchmark (pandas input)."""
+"""CLI launcher for scenario-based bandit benchmark (polars input)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
-import pandas as pd
+import polars as pl
 
 from bandit_benchmark import (
     Action,
@@ -24,24 +24,24 @@ from bandit_benchmark import (
 )
 
 
-def load_dataset(path: str) -> pd.DataFrame:
+def load_dataset(path: str) -> pl.DataFrame:
     ext = Path(path).suffix.lower()
     if ext == ".parquet":
-        return pd.read_parquet(path)
-    return pd.read_csv(path)
+        return pl.read_parquet(path)
+    return pl.read_csv(path)
 
 
-def make_empirical_ctr_scorer(train_df: pd.DataFrame) -> Callable[[pd.Series, Action], float]:
+def make_empirical_ctr_scorer(train_df: pl.DataFrame) -> Callable[[dict[str, object], Action], float]:
     clicks = defaultdict(float)
     shows = defaultdict(float)
-    for _, row in train_df.iterrows():
+    for row in train_df.iter_rows(named=True):
         action = int(row["show"])
         shows[action] += 1.0
         clicks[action] += float(row["reward"])
 
     global_ctr = (sum(clicks.values()) / sum(shows.values())) if shows else 0.01
 
-    def scorer(_row: pd.Series, action: Action) -> float:
+    def scorer(_row: dict[str, object], action: Action) -> float:
         n = shows.get(action, 0.0)
         if n <= 0.0:
             return global_ctr
@@ -54,7 +54,49 @@ def default_scenarios_from_args() -> list[ScenarioConfig]:
     return default_five_scenarios()
 
 
-def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
+def make_live_plot_callback(enabled: bool, every_steps: int):
+    if not enabled:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    plt.ion()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    def callback(run_name: str, step: int, history_df: pl.DataFrame) -> None:
+        if step % every_steps != 0 and step != 1:
+            return
+        if history_df.height == 0:
+            return
+        axes[0].clear()
+        axes[1].clear()
+
+        x = history_df["step"].to_list()
+        y1 = history_df["avg_reward"].to_list()
+        y2 = history_df["avg_regret"].to_list()
+
+        axes[0].plot(x, y1)
+        axes[0].set_title(f"{run_name}: avg_reward")
+        axes[0].set_xlabel("step")
+        axes[0].set_ylabel("avg_reward")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(x, y2)
+        axes[1].set_title(f"{run_name}: avg_regret")
+        axes[1].set_xlabel("step")
+        axes[1].set_ylabel("avg_regret")
+        axes[1].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        fig.canvas.draw_idle()
+        plt.pause(0.001)
+
+    return callback
+
+
+def save_plots(history_df: pl.DataFrame, out_dir: str) -> list[str]:
     try:
         import matplotlib.pyplot as plt
     except Exception:
@@ -63,12 +105,18 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
     output_paths: list[str] = []
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-    for scenario_name, part in history_df.groupby("scenario"):
+    if history_df.height == 0:
+        return output_paths
+
+    scenario_names = history_df.select("scenario").unique().to_series().to_list()
+    for scenario_name in scenario_names:
+        part = history_df.filter(pl.col("scenario") == scenario_name)
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-        for algo, algo_df in part.groupby("algo"):
-            axes[0].plot(algo_df["step"], algo_df["avg_reward"], label=algo)
-            axes[1].plot(algo_df["step"], algo_df["avg_regret"], label=algo)
+        for algo in part.select("algo").unique().to_series().to_list():
+            algo_df = part.filter(pl.col("algo") == algo)
+            axes[0].plot(algo_df["step"].to_list(), algo_df["avg_reward"].to_list(), label=algo)
+            axes[1].plot(algo_df["step"].to_list(), algo_df["avg_regret"].to_list(), label=algo)
 
         axes[0].set_title(f"{scenario_name}: average reward")
         axes[0].set_xlabel("step")
@@ -100,6 +148,9 @@ def main() -> None:
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
     parser.add_argument("--stochastic-sim", action="store_true", help="In simulation, sample Bernoulli reward")
     parser.add_argument("--output-dir", default="artifacts")
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
+    parser.add_argument("--live-plots", action="store_true", help="Show live plots during evaluation")
+    parser.add_argument("--plot-every", type=int, default=50, help="Update live plot every N used steps")
     args = parser.parse_args()
 
     raw_df = load_dataset(args.input)
@@ -116,19 +167,19 @@ def main() -> None:
 
     env_reward = None
     if args.simulate:
-        env_reward = make_simulated_environment(
-            proba_predictor=scorer,
-            stochastic=args.stochastic_sim,
-            seed=args.seed,
-        )
+        env_reward = make_simulated_environment(proba_predictor=scorer, stochastic=args.stochastic_sim, seed=args.seed)
 
     scenarios = default_scenarios_from_args()
+    live_cb = make_live_plot_callback(enabled=args.live_plots, every_steps=max(args.plot_every, 1))
+
     result = run_scenarios(
         train_df=train_df,
         test_df=test_df,
         policy_factories=policy_factories,
         scenarios=scenarios,
         env_reward=env_reward,
+        show_progress=not args.no_progress,
+        on_step=live_cb,
     )
 
     metrics_df = result["metrics"]
@@ -138,8 +189,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.csv"
     history_path = out_dir / "history.csv"
-    metrics_df.to_csv(metrics_path, index=False)
-    history_df.to_csv(history_path, index=False)
+    metrics_df.write_csv(str(metrics_path))
+    history_df.write_csv(str(history_path))
 
     print(f"saved metrics: {metrics_path}")
     print(f"saved history: {history_path}")
@@ -151,7 +202,7 @@ def main() -> None:
         for p in plot_paths:
             print(f" - {p}")
     else:
-        print("plots were not generated (matplotlib is unavailable)")
+        print("plots were not generated (matplotlib is unavailable or no history)")
 
 
 if __name__ == "__main__":
