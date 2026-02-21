@@ -48,3 +48,12 @@
 - `artifacts/metrics.csv`
 - `artifacts/history.csv`
 - `artifacts/plots/*.png` (если доступен matplotlib)
+
+## Ноутбук для запуска
+Добавлен ноутбук `notebooks/run_benchmark_demo.ipynb` — в нем повторён flow из `run_benchmark.py`:
+- загрузка данных,
+- preprocess/split,
+- запуск `run_scenarios`,
+- просмотр `metrics/history`,
+- построение графиков,
+- сохранение `artifacts/*.csv`.
