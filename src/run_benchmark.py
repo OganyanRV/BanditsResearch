@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Callable
 
 import pandas as pd
 import polars as pl
 
 from bandit_benchmark import (
-    Action,
     EpsilonGreedyPolicy,
-    ScenarioConfig,
     ThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
+    default_five_ips_scenarios,
     default_five_scenarios,
     make_simulated_environment,
     preprocess_bandit_dataframe,
@@ -29,48 +27,6 @@ def load_dataset(path: str) -> pl.DataFrame:
     if ext == ".parquet":
         return pl.read_parquet(path)
     return pl.read_csv(path, separator="\t", schema_overrides={"candidates": pl.String})
-
-
-def default_scenarios_from_args() -> list[ScenarioConfig]:
-    return default_five_scenarios()
-
-
-def make_live_plot_callback(enabled: bool, every_steps: int):
-    if not enabled:
-        return None
-    try:
-        import matplotlib.pyplot as plt
-    except Exception:
-        return None
-
-    plt.ion()
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-    def callback(run_name: str, step: int, history_df: pd.DataFrame) -> None:
-        if step % every_steps != 0 and step != 1:
-            return
-        if history_df.empty:
-            return
-        axes[0].clear()
-        axes[1].clear()
-
-        axes[0].plot(history_df["step"], history_df["avg_reward"])
-        axes[0].set_title(f"{run_name}: avg_reward")
-        axes[0].set_xlabel("step")
-        axes[0].set_ylabel("avg_reward")
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(history_df["step"], history_df["avg_regret"])
-        axes[1].set_title(f"{run_name}: avg_regret")
-        axes[1].set_xlabel("step")
-        axes[1].set_ylabel("avg_regret")
-        axes[1].grid(True, alpha=0.3)
-
-        fig.tight_layout()
-        fig.canvas.draw_idle()
-        plt.pause(0.001)
-
-    return callback
 
 
 def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
@@ -121,15 +77,19 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
     parser.add_argument("--stochastic-sim", action="store_true", help="In simulation, sample Bernoulli reward")
+    parser.add_argument("--ips-scenarios", action="store_true", help="Run IPS-oriented five scenarios naming")
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
-    parser.add_argument("--live-plots", action="store_true", help="Show live plots during evaluation")
-    parser.add_argument("--plot-every", type=int, default=50, help="Update live plot every N used steps")
     args = parser.parse_args()
 
     raw_df = load_dataset(args.input)
     df = preprocess_bandit_dataframe(raw_df)
     train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
+
+    train_df = train_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
+    test_df = test_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
+
+    test_df = test_df.filter(pl.col("policy") == "random")
 
     policy_factories = {
         "epsilon_greedy": lambda: EpsilonGreedyPolicy(epsilon=args.epsilon, seed=args.seed),
@@ -142,8 +102,7 @@ def main() -> None:
         expected_fn = build_expected_reward_estimator(train_df)
         env_reward = make_simulated_environment(proba_predictor=expected_fn, stochastic=args.stochastic_sim, seed=args.seed)
 
-    scenarios = default_scenarios_from_args()
-    live_cb = make_live_plot_callback(enabled=args.live_plots, every_steps=max(args.plot_every, 1))
+    scenarios = default_five_ips_scenarios() if args.ips_scenarios else default_five_scenarios()
 
     result = run_scenarios(
         train_df=train_df,
@@ -152,7 +111,6 @@ def main() -> None:
         scenarios=scenarios,
         env_reward=env_reward,
         show_progress=not args.no_progress,
-        on_step=live_cb,
     )
 
     metrics_df = result["metrics"]

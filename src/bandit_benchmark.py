@@ -144,7 +144,7 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    return df.with_columns(
+    prepared = df.with_columns(
         [
             pl.col("show").cast(pl.Int64),
             pl.col("reward"),
@@ -152,6 +152,9 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
             pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
             pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
         ]
+    )
+    return prepared.with_columns(
+        (pl.lit(1.0) / pl.col("candidates_list").list.len().cast(pl.Float64)).alias("propensity")
     )
 
 
@@ -201,7 +204,6 @@ def evaluate_policy(
     expected_reward_fn: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
-    on_step: Callable[[str, int, pd.DataFrame], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     used = 0
@@ -267,8 +269,6 @@ def evaluate_policy(
                 "avg_regret": cumulative_regret / used,
             }
         )
-        if on_step is not None:
-            on_step(progress_desc, step, pd.DataFrame(history_rows))
 
         if pbar is not None and step >= next_progress_mark:
             pbar.update(step - pbar.n)
@@ -304,7 +304,6 @@ def run_scenarios(
     scenarios: list[ScenarioConfig],
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
-    on_step: Callable[[str, int, pd.DataFrame], None] | None = None,
 ) -> dict[str, pd.DataFrame]:
     metrics_parts: list[pd.DataFrame] = []
     history_parts: list[pd.DataFrame] = []
@@ -326,7 +325,6 @@ def run_scenarios(
                 expected_reward_fn=expected_reward_fn,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
-                on_step=on_step,
             )
             metrics_df["scenario"] = scenario.name
             metrics_df["algo"] = algo_name
@@ -365,4 +363,15 @@ def default_five_scenarios() -> list[ScenarioConfig]:
         ScenarioConfig("case_3_all_pretrain_predict_only", "all", False),
         ScenarioConfig("case_4_all_pretrain_online_update", "all", True),
         ScenarioConfig("case_5_no_pretrain_online_update", "none", True),
+    ]
+
+
+def default_five_ips_scenarios() -> list[ScenarioConfig]:
+    """Same 5 scenarios, but intended for IPS evaluation on random-policy test slice."""
+    return [
+        ScenarioConfig("ips_case_1_random_pretrain_predict_only", "random", False),
+        ScenarioConfig("ips_case_2_random_pretrain_online_update", "random", True),
+        ScenarioConfig("ips_case_3_all_pretrain_predict_only", "all", False),
+        ScenarioConfig("ips_case_4_all_pretrain_online_update", "all", True),
+        ScenarioConfig("ips_case_5_no_pretrain_online_update", "none", True),
     ]
