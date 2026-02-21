@@ -11,11 +11,9 @@ import pandas as pd
 import polars as pl
 
 try:
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 except Exception:  # noqa: BLE001
-    def tqdm(iterable=None, **kwargs):  # type: ignore
-        del kwargs
-        return iterable
+    tqdm = None
 
 Action = int
 NULL_FEATURE_FILL = -1e-6
@@ -121,7 +119,7 @@ class ContextualBanditPlaceholder(BasePolicy):
 def _parse_candidates(raw: str) -> list[int]:
     if raw is None or raw == "":
         return []
-    return [int(x) for x in str(raw).split("\t") if str(x) != ""]
+    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
 
 
 def _parse_features(raw: str) -> list[float]:
@@ -129,7 +127,7 @@ def _parse_features(raw: str) -> list[float]:
         return []
 
     vals: list[float] = []
-    for x in str(raw).split("\t"):
+    for x in str(raw).split("\\t"):
         token = str(x).strip().lower()
         if token == "":
             continue
@@ -141,7 +139,7 @@ def _parse_features(raw: str) -> list[float]:
 
 
 def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
-    req = {"policy", "reward", "puid", "features", "show", "candidates", "date"}
+    req = {"policy", "reward", "features", "show", "candidates", "date"}
     missing = req - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -190,9 +188,7 @@ def build_expected_reward_estimator(train_df: pl.DataFrame) -> Callable[[dict[st
 
     def estimate(_row: dict[str, object], action: Action) -> float:
         n = counts.get(action, 0)
-        if n == 0:
-            return global_mean
-        return sums[action] / n
+        return (sums[action] / n) if n > 0 else global_mean
 
     return estimate
 
@@ -205,7 +201,6 @@ def evaluate_policy(
     expected_reward_fn: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
-    progress_position: int = 1,
     on_step: Callable[[str, int, pd.DataFrame], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
@@ -214,16 +209,27 @@ def evaluate_policy(
     cumulative_regret = 0.0
     history_rows: list[dict[str, float | int]] = []
 
-    rows = test_df.iter_rows(named=True)
-    rows_iter = tqdm(rows, total=test_df.height, desc=progress_desc, leave=False, disable=not show_progress, position=progress_position)
+    total_steps = max(test_df.height, 1)
+    update_chunk = max(1, int(total_steps * 0.10))
+    progress_chunk = max(1, int(total_steps * 0.05))
 
-    for step, row in enumerate(rows_iter, start=1):
+    pbar = None
+    if show_progress and tqdm is not None:
+        pbar = tqdm(total=test_df.height, desc=progress_desc, leave=False, dynamic_ncols=True, mininterval=0.5)
+
+    pending_updates: list[tuple[int, float, list[float]]] = []
+    next_progress_mark = progress_chunk
+
+    for step, row in enumerate(test_df.iter_rows(named=True), start=1):
         candidates = row["candidates_list"]
         features = row["features_list"]
         action = int(policy.select(candidates, features, row))
 
         if env_reward is None:
             if action != int(row["show"]):
+                if pbar is not None and step >= next_progress_mark:
+                    pbar.update(step - pbar.n)
+                    next_progress_mark += progress_chunk
                 continue
             reward = float(row["reward"])
             replay_matches += 1
@@ -246,7 +252,11 @@ def evaluate_policy(
         used += 1
 
         if online_update and policy.can_update_online:
-            policy.update(action, reward, features)
+            pending_updates.append((action, reward, features))
+            if len(pending_updates) >= update_chunk:
+                for a, r, f in pending_updates:
+                    policy.update(a, r, f)
+                pending_updates.clear()
 
         history_rows.append(
             {
@@ -257,23 +267,32 @@ def evaluate_policy(
                 "avg_regret": cumulative_regret / used,
             }
         )
-
         if on_step is not None:
             on_step(progress_desc, step, pd.DataFrame(history_rows))
 
+        if pbar is not None and step >= next_progress_mark:
+            pbar.update(step - pbar.n)
+            next_progress_mark += progress_chunk
+
+    if pending_updates:
+        for a, r, f in pending_updates:
+            policy.update(a, r, f)
+
+    if pbar is not None:
+        pbar.update(test_df.height - pbar.n)
+        pbar.close()
+
     ctr = total_reward / used if used else 0.0
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
-    metrics_df = pd.DataFrame(
-        [
-            {
-                "impressions_total": test_df.height,
-                "impressions_used": used,
-                "total_reward": total_reward,
-                "ctr": ctr,
-                "replay_match_rate": match_rate,
-            }
-        ]
-    )
+    metrics_df = pd.DataFrame([
+        {
+            "impressions_total": test_df.height,
+            "impressions_used": used,
+            "total_reward": total_reward,
+            "ctr": ctr,
+            "replay_match_rate": match_rate,
+        }
+    ])
     history_df = pd.DataFrame(history_rows)
     return metrics_df, history_df
 
@@ -290,9 +309,7 @@ def run_scenarios(
     metrics_parts: list[pd.DataFrame] = []
     history_parts: list[pd.DataFrame] = []
 
-    scenario_iter = tqdm(scenarios, desc="scenarios", leave=False, position=0, disable=not show_progress)
-    for scenario in scenario_iter:
-        scenario_iter.set_description(f"scenario={scenario.name}")
+    for scenario in scenarios:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
         expected_reward_fn = build_expected_reward_estimator(pretrain_df if pretrain_df.height > 0 else train_df)
 
@@ -309,7 +326,6 @@ def run_scenarios(
                 expected_reward_fn=expected_reward_fn,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
-                progress_position=1,
                 on_step=on_step,
             )
             metrics_df["scenario"] = scenario.name

@@ -4,10 +4,9 @@
 Ожидается таблица (TSV/Parquet) с колонками:
 - `policy`
 - `reward`
-- `puid`
-- `features` — строка чисел, разделённых `"\t"` (возможны `null`)
+- `features` — строка чисел, разделённых `"\\t"` (возможны `null`)
 - `show`
-- `candidates` — строка id, разделённых `"\t"`
+- `candidates` — строка id, разделённых `"\\t"`
 - `date`
 
 Парсинг делает `preprocess_bandit_dataframe(...)`:
@@ -16,17 +15,18 @@
 - `null/none/nan` в features заменяется на `-1e-6`.
 
 ## Ключевые изменения
-- Убран CatBoost из кода раннера.
-- Обработка данных на polars, а метрики и история возвращаются как pandas DataFrame.
-- `tqdm` есть и на уровне сценариев, и внутри `evaluate_policy`; бары переиспользуются (не плодятся строки).
-- Есть live-построение графиков в процессе проигрывания политик: `--live-plots --plot-every N`.
+- CatBoost убран из раннера: только `epsilon_greedy`, `ucb`, `thompson_sampling`.
+- Обработка данных на polars, а `metrics` и `history` возвращаются как pandas DataFrame.
+- Статистика в политиках обновляется батчами: каждые ~10% шагов теста.
+- `tqdm` обновляется не на каждом шаге, а каждые ~5% шагов, чтобы не засорять вывод.
+- Live-графики во время проигрывания политик: `--live-plots --plot-every N`.
 
 ## Регрет
 - Если есть `env_reward` (симуляция):
   - regret = best_reward_among_candidates - chosen_reward.
 - Если среды нет:
-  - regret считается по оценкам матожиданий действий
-    `max_a E[r|a] - E[r|a_chosen]`, где `E[r|a]` — эмпирическая оценка по pretrain/train.
+  - regret считается как `max_a E[r|a] - E[r|a_chosen]`,
+    где `E[r|a]` — эмпирическая оценка на train/pretrain.
 
 ## Сценарии параметрами
 `run_scenarios(train_df, test_df, policy_factories, scenarios, ...)`, где `scenarios: list[ScenarioConfig]`.
