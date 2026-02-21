@@ -1,4 +1,4 @@
-"""Benchmark helpers for logged ad bandit data (polars-first version)."""
+"""Benchmark helpers for logged ad bandit data (polars processing + pandas metrics)."""
 
 from __future__ import annotations
 
@@ -7,16 +7,18 @@ import math
 import random
 from typing import Callable, Literal
 
+import pandas as pd
 import polars as pl
 
 try:
     from tqdm import tqdm
 except Exception:  # noqa: BLE001
-    def tqdm(iterable, **kwargs):  # type: ignore
+    def tqdm(iterable=None, **kwargs):  # type: ignore
         del kwargs
         return iterable
 
 Action = int
+NULL_FEATURE_FILL = -1e-6
 
 
 @dataclass
@@ -78,7 +80,6 @@ class UCBPolicy(BasePolicy):
         for a in candidates:
             if self.counts.get(a, 0) == 0:
                 return a
-
         log_t = math.log(max(self.t, 1))
         return max(candidates, key=lambda a: self.values[a] + math.sqrt(self.exploration * log_t / self.counts[a]))
 
@@ -111,19 +112,6 @@ class ThompsonSamplingPolicy(BasePolicy):
         self.beta[action] = self.beta.get(action, self.beta0) + (1.0 - reward)
 
 
-class CatBoostPolicy(BasePolicy):
-    can_update_online = False
-
-    def __init__(self, scorer: Callable[[dict[str, object], Action], float]):
-        self.scorer = scorer
-
-    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
-        del features
-        if not candidates:
-            raise ValueError("Empty candidate set")
-        return max(candidates, key=lambda a: self.scorer(row, a))
-
-
 class ContextualBanditPlaceholder(BasePolicy):
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
@@ -139,7 +127,17 @@ def _parse_candidates(raw: str) -> list[int]:
 def _parse_features(raw: str) -> list[float]:
     if raw is None or raw == "":
         return []
-    return [float(x) for x in str(raw).split("\t") if str(x) != ""]
+
+    vals: list[float] = []
+    for x in str(raw).split("\t"):
+        token = str(x).strip().lower()
+        if token == "":
+            continue
+        if token in {"null", "none", "nan"}:
+            vals.append(NULL_FEATURE_FILL)
+        else:
+            vals.append(float(token))
+    return vals
 
 
 def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
@@ -148,16 +146,15 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    out = df.with_columns(
+    return df.with_columns(
         [
             pl.col("show").cast(pl.Int64),
-            pl.col("reward").cast(pl.Float64),
+            pl.col("reward"),
             pl.col("date").str.to_datetime(strict=False),
             pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
             pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
         ]
     )
-    return out
 
 
 def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -178,16 +175,39 @@ def select_pretrain_data(train_df: pl.DataFrame, source: Literal["random", "all"
     raise ValueError(f"Unknown pretrain source: {source}")
 
 
+def build_expected_reward_estimator(train_df: pl.DataFrame) -> Callable[[dict[str, object], Action], float]:
+    sums: dict[int, float] = {}
+    counts: dict[int, int] = {}
+    for row in train_df.iter_rows(named=True):
+        a = int(row["show"])
+        r = float(row["reward"])
+        sums[a] = sums.get(a, 0.0) + r
+        counts[a] = counts.get(a, 0) + 1
+
+    total_sum = sum(sums.values())
+    total_n = sum(counts.values())
+    global_mean = (total_sum / total_n) if total_n > 0 else 0.0
+
+    def estimate(_row: dict[str, object], action: Action) -> float:
+        n = counts.get(action, 0)
+        if n == 0:
+            return global_mean
+        return sums[action] / n
+
+    return estimate
+
+
 def evaluate_policy(
     policy: BasePolicy,
     test_df: pl.DataFrame,
     online_update: bool,
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
+    expected_reward_fn: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
-    progress_position: int | None = None,
-    on_step: Callable[[str, int, pl.DataFrame], None] | None = None,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+    progress_position: int = 1,
+    on_step: Callable[[str, int, pd.DataFrame], None] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     used = 0
     replay_matches = 0
@@ -207,7 +227,12 @@ def evaluate_policy(
                 continue
             reward = float(row["reward"])
             replay_matches += 1
-            regret = 0.0
+            if expected_reward_fn is None:
+                regret = 0.0
+            else:
+                mu_chosen = float(expected_reward_fn(row, action))
+                mu_best = max(float(expected_reward_fn(row, a)) for a in candidates) if candidates else mu_chosen
+                regret = mu_best - mu_chosen
         else:
             reward = float(env_reward(row, action))
             candidate_rewards = [float(env_reward(row, a)) for a in candidates] if candidates else [reward]
@@ -232,27 +257,24 @@ def evaluate_policy(
                 "avg_regret": cumulative_regret / used,
             }
         )
+
         if on_step is not None:
-            on_step(progress_desc, step, pl.DataFrame(history_rows))
+            on_step(progress_desc, step, pd.DataFrame(history_rows))
 
     ctr = total_reward / used if used else 0.0
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
-    metrics_df = pl.DataFrame(
-        {
-            "impressions_total": [test_df.height],
-            "impressions_used": [used],
-            "total_reward": [total_reward],
-            "ctr": [ctr],
-            "replay_match_rate": [match_rate],
-        }
+    metrics_df = pd.DataFrame(
+        [
+            {
+                "impressions_total": test_df.height,
+                "impressions_used": used,
+                "total_reward": total_reward,
+                "ctr": ctr,
+                "replay_match_rate": match_rate,
+            }
+        ]
     )
-    history_df = pl.DataFrame(history_rows) if history_rows else pl.DataFrame(schema={
-        "step": pl.Int64,
-        "reward": pl.Float64,
-        "avg_reward": pl.Float64,
-        "cumulative_regret": pl.Float64,
-        "avg_regret": pl.Float64,
-    })
+    history_df = pd.DataFrame(history_rows)
     return metrics_df, history_df
 
 
@@ -263,17 +285,18 @@ def run_scenarios(
     scenarios: list[ScenarioConfig],
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
-    on_step: Callable[[str, int, pl.DataFrame], None] | None = None,
-) -> dict[str, pl.DataFrame]:
-    metrics_parts: list[pl.DataFrame] = []
-    history_parts: list[pl.DataFrame] = []
+    on_step: Callable[[str, int, pd.DataFrame], None] | None = None,
+) -> dict[str, pd.DataFrame]:
+    metrics_parts: list[pd.DataFrame] = []
+    history_parts: list[pd.DataFrame] = []
 
-    scenario_iter = tqdm(scenarios, desc="scenarios", disable=not show_progress)
+    scenario_iter = tqdm(scenarios, desc="scenarios", leave=False, position=0, disable=not show_progress)
     for scenario in scenario_iter:
+        scenario_iter.set_description(f"scenario={scenario.name}")
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
-        algo_iter = tqdm(policy_factories.items(), desc=f"{scenario.name}/algos", leave=False, disable=not show_progress)
+        expected_reward_fn = build_expected_reward_estimator(pretrain_df if pretrain_df.height > 0 else train_df)
 
-        for algo_name, make_policy in algo_iter:
+        for algo_name, make_policy in policy_factories.items():
             policy = make_policy()
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
@@ -283,17 +306,23 @@ def run_scenarios(
                 test_df=test_df,
                 online_update=scenario.online_update,
                 env_reward=env_reward,
+                expected_reward_fn=expected_reward_fn,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
+                progress_position=1,
                 on_step=on_step,
             )
-            metrics_parts.append(metrics_df.with_columns([pl.lit(scenario.name).alias("scenario"), pl.lit(algo_name).alias("algo")]))
+            metrics_df["scenario"] = scenario.name
+            metrics_df["algo"] = algo_name
+            metrics_parts.append(metrics_df)
 
-            if history_df.height > 0:
-                history_parts.append(history_df.with_columns([pl.lit(scenario.name).alias("scenario"), pl.lit(algo_name).alias("algo")]))
+            if not history_df.empty:
+                history_df["scenario"] = scenario.name
+                history_df["algo"] = algo_name
+                history_parts.append(history_df)
 
-    out_metrics = pl.concat(metrics_parts, how="vertical") if metrics_parts else pl.DataFrame()
-    out_history = pl.concat(history_parts, how="vertical") if history_parts else pl.DataFrame()
+    out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
+    out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
     return {"metrics": out_metrics, "history": out_history}
 
 
