@@ -264,6 +264,81 @@ class PartitionedTSPolicy(BasePolicy):
         return best_action
 
 
+class CatBoostPolicy(BasePolicy):
+    """Gradient boosting policy based on CatBoostClassifier.
+
+    Model is train-once: repeated fit calls are forbidden.
+    """
+
+    can_update_online = False
+
+    def __init__(self, random_seed: int = 42):
+        self.random_seed = random_seed
+        self._model = None
+        self._fitted = False
+
+    @staticmethod
+    def _row_to_vector(features: list[float], action: int) -> list[float]:
+        return list(features) + [float(action)]
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        if self._fitted:
+            raise RuntimeError("CatBoostPolicy can only be trained once")
+        if train_df.height == 0:
+            self._fitted = True
+            return
+
+        try:
+            from catboost import CatBoostClassifier
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("catboost is required for CatBoostPolicy") from exc
+
+        X: list[list[float]] = []
+        y: list[int] = []
+        for row in train_df.iter_rows(named=True):
+            action = int(row["show"])
+            features = row["features_list"]
+            X.append(self._row_to_vector(features, action))
+            y.append(int(float(row["reward"]) > 0.0))
+
+        if not X:
+            self._fitted = True
+            return
+
+        model = CatBoostClassifier(
+            iterations=200,
+            depth=6,
+            learning_rate=0.05,
+            loss_function="Logloss",
+            verbose=False,
+            random_seed=self.random_seed,
+        )
+        model.fit(X, y)
+        self._model = model
+        self._fitted = True
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        del row
+        if not candidates:
+            raise ValueError("Empty candidate set")
+        if self._model is None:
+            return candidates[0]
+
+        best_action = candidates[0]
+        best_score = -1.0
+        for a in candidates:
+            vec = self._row_to_vector(features, int(a))
+            p = float(self._model.predict_proba([vec])[0][1])
+            if p > best_score:
+                best_score = p
+                best_action = int(a)
+        return best_action
+
+    def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
+        del action, reward, features
+        return
+
+
 def _parse_candidates(raw: str) -> list[int]:
     if raw is None or raw == "":
         return []
