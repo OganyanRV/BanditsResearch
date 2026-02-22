@@ -36,6 +36,10 @@ class BasePolicy:
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
 
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        for a, r, f in pending_updates:
+            self.update(a, r, f)
+
     def fit(self, train_df: pl.DataFrame) -> None:
         for row in train_df.iter_rows(named=True):
             self.update(int(row["show"]), float(row["reward"]), row["features_list"])
@@ -504,8 +508,7 @@ def evaluate_policy(
         if online_update and policy.can_update_online:
             pending_updates.append((action, reward, features))
             if len(pending_updates) >= update_chunk:
-                for a, r, f in pending_updates:
-                    policy.update(a, r, f)
+                policy.update_batch(pending_updates)
                 pending_updates.clear()
 
         history_rows.append(
@@ -527,8 +530,7 @@ def evaluate_policy(
             next_progress_mark += progress_chunk
 
     if pending_updates:
-        for a, r, f in pending_updates:
-            policy.update(a, r, f)
+        policy.update_batch(pending_updates)
 
     if pbar is not None:
         pbar.update(test_df.height - pbar.n)
