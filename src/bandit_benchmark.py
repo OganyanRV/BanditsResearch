@@ -220,7 +220,8 @@ def evaluate_policy(
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
-    max_random_ctr: float = 0.0,
+    ctr_by_action: dict[int, float] | None = None,
+    global_random_ctr: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
@@ -229,6 +230,8 @@ def evaluate_policy(
     cumulative_regret = 0.0
     cumulative_ips_regret = 0.0
     history_rows: list[dict[str, float | int]] = []
+
+    action_ctr = ctr_by_action or {}
 
     total_steps = max(test_df.height, 1)
     update_chunk = max(1, int(total_steps * 0.10))
@@ -252,7 +255,9 @@ def evaluate_policy(
 
         ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
         ips_weighted_reward_sum += ips_reward
-        ips_step_regret = max_random_ctr - (logged_reward if logged_match else 0.0)
+        candidate_ctrs = [action_ctr.get(int(a), global_random_ctr) for a in candidates] if candidates else [global_random_ctr]
+        step_max_ctr = max(candidate_ctrs) if candidate_ctrs else global_random_ctr
+        ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
         cumulative_ips_regret += ips_step_regret
 
         if env_reward is None:
@@ -260,27 +265,14 @@ def evaluate_policy(
                 if pbar is not None and step >= next_progress_mark:
                     pbar.update(step - pbar.n)
                     next_progress_mark += progress_chunk
-                history_rows.append(
-                    {
-                        "step": step,
-                        "reward": 0.0,
-                        "avg_reward": (total_reward / used) if used else 0.0,
-                        "ips_reward": ips_reward,
-                        "ips_avg_reward": ips_weighted_reward_sum / step,
-                        "cumulative_regret": cumulative_regret,
-                        "avg_regret": (cumulative_regret / used) if used else 0.0,
-                        "cumulative_ips_regret": cumulative_ips_regret,
-                        "avg_ips_regret": cumulative_ips_regret / step,
-                    }
-                )
                 continue
             reward = logged_reward
             replay_matches += 1
-            regret = max_random_ctr - reward
+            regret = step_max_ctr - reward
         else:
             reward = float(env_reward(row, action))
             replay_matches += int(action == int(row["show"]))
-            regret = max_random_ctr - reward
+            regret = step_max_ctr - reward
 
         total_reward += reward
         cumulative_regret += regret
@@ -331,7 +323,7 @@ def evaluate_policy(
             "ips_weighted_reward": ips_weighted_reward_sum,
             "ips_ctr": ips_ctr,
             "replay_match_rate": match_rate,
-            "max_random_ctr": max_random_ctr,
+            "global_random_ctr": global_random_ctr,
         }
     ])
     history_df = pd.DataFrame(history_rows)
@@ -351,8 +343,7 @@ def run_scenarios(
 
     for scenario in scenarios:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
-        ctr_by_action, max_random_ctr = build_random_action_ctr_stats(train_df)
-        del ctr_by_action
+        ctr_by_action, global_random_ctr = build_random_action_ctr_stats(train_df)
 
         for algo_name, make_policy in policy_factories.items():
             policy = make_policy()
@@ -366,7 +357,8 @@ def run_scenarios(
                 env_reward=env_reward,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
-                max_random_ctr=max_random_ctr,
+                ctr_by_action=ctr_by_action,
+                global_random_ctr=global_random_ctr,
             )
             metrics_df["scenario"] = scenario.name
             metrics_df["algo"] = algo_name

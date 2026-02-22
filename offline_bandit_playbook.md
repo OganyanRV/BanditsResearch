@@ -29,13 +29,13 @@
 - далее тест ограничивается `policy == random`.
 
 ## Регрет
-Регрет считается одинаково для обоих треков (replay и IPS):
-- сначала один раз считаем `CTR(action)` на данных, где `policy == random`
-- берём `max_random_ctr = max_a CTR(a)`
-- далее на шаге `regret_t = max_random_ctr - reward_t_fact`.
+Регрет считается на каждом шаге по доступным действиям:
+- один раз считаем `CTR(action)` на данных, где `policy == random`
+- на шаге берём максимум только по доступным действиям `candidates`: `max_available_ctr_t = max_{a in candidates_t} CTR(a)`
+- далее `regret_t = max_available_ctr_t - reward_t_fact`.
 
 Где `reward_t_fact`:
-- для replay (без IPS) — фактический наблюдаемый reward (на матчах replay),
+- для replay — фактический наблюдаемый reward (только на матчах replay),
 - для IPS-трека — фактический reward, если был матч, иначе 0.
 
 ## Сценарии
@@ -48,6 +48,8 @@
 - IPS-метрики (`ips_reward`, `ips_avg_reward`, `ips_ctr`)
 
 IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
+В replay-ветке шаг без совпадения действия и показа не добавляется в history.
+
 ## Возвращаемые результаты
 `run_scenarios(...)` возвращает dict:
 1. `metrics` — pandas DataFrame (по `(scenario, algo)`)
