@@ -74,5 +74,7 @@ IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 
 
 При построении графиков используется downsampling:
-- `stride = max(1, int(round(max_step * 0.02)))`
+- `stride = max(1, int(round(max_step * 0.05)))`
 - `ds = algo_df.iloc[stride::stride]`
+
+Для графиков regret используется log-scale по оси Y.

@@ -389,6 +389,8 @@ def evaluate_policy(
     ctr = total_reward / used if used else 0.0
     ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
+    final_avg_regret = (cumulative_regret / used) if used else 0.0
+    final_avg_ips_regret = (cumulative_ips_regret / test_df.height) if test_df.height else 0.0
     metrics_df = pd.DataFrame([
         {
             "impressions_total": test_df.height,
@@ -399,6 +401,10 @@ def evaluate_policy(
             "ips_ctr": ips_ctr,
             "replay_match_rate": match_rate,
             "global_random_ctr": global_random_ctr,
+            "cumulative_regret": cumulative_regret,
+            "avg_regret": final_avg_regret,
+            "cumulative_ips_regret": cumulative_ips_regret,
+            "avg_ips_regret": final_avg_ips_regret,
         }
     ])
     history_df = pd.DataFrame(history_rows)

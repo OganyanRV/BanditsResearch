@@ -47,7 +47,7 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
 
         for algo, algo_df in part.groupby("algo"):
             max_step = int(algo_df["step"].max()) if len(algo_df) else 0
-            stride = max(1, int(round(max_step * 0.02)))
+            stride = max(1, int(round(max_step * 0.05)))
             ds = algo_df.iloc[stride::stride] if len(algo_df) > stride else algo_df
             axes[0].plot(ds["step"], ds["avg_reward"], label=algo)
             axes[1].plot(ds["step"], ds["avg_regret"], label=algo)
@@ -59,6 +59,7 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
         axes[1].set_title(f"{scenario_name}: average regret")
         axes[1].set_xlabel("step")
         axes[1].set_ylabel("avg_regret")
+        axes[1].set_yscale("log")
 
         for ax in axes:
             ax.grid(True, alpha=0.3)
@@ -76,7 +77,7 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run scenario-based benchmark for bandit policies")
     parser.add_argument("--input", required=True, help="Path to source dataset (tsv/parquet)")
-    parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument("--test-ratio", type=float, default=0.5)
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
