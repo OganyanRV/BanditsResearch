@@ -29,21 +29,25 @@
 - далее тест ограничивается `policy == random`.
 
 ## Регрет
-- Если есть `env_reward` (симуляция):
-  - regret = best_reward_among_candidates - chosen_reward.
-- Если среды нет:
-  - regret считается как `max_a E[r|a] - E[r|a_chosen]`,
-    где `E[r|a]` — эмпирическая оценка на train/pretrain.
+Регрет считается одинаково для обоих треков (replay и IPS):
+- сначала один раз считаем `CTR(action)` на данных, где `policy == random`
+- берём `max_random_ctr = max_a CTR(a)`
+- далее на шаге `regret_t = max_random_ctr - reward_t_fact`.
+
+Где `reward_t_fact`:
+- для replay (без IPS) — фактический наблюдаемый reward (на матчах replay),
+- для IPS-трека — фактический reward, если был матч, иначе 0.
 
 ## Сценарии
 - `default_five_scenarios()` — базовые 5 сценариев.
 - `default_five_ips_scenarios()` — те же 5 сценариев, но с IPS-ориентированными именами и запуском IPS-оценивания в раннере.
 
-## IPS-режим
-При запуске с `--ips-scenarios` раннер считает reward как IPS-оценку:
-- `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`
-- итоговый CTR = среднее IPS-наград по тесту.
+## IPS-статистики (считаются одновременно)
+Раннер всегда считает две ветки метрик одновременно:
+- replay-метрики (`reward`, `avg_reward`, `ctr`)
+- IPS-метрики (`ips_reward`, `ips_avg_reward`, `ips_ctr`)
 
+IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 ## Возвращаемые результаты
 `run_scenarios(...)` возвращает dict:
 1. `metrics` — pandas DataFrame (по `(scenario, algo)`)
