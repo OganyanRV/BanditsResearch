@@ -116,6 +116,140 @@ class ContextualBanditPlaceholder(BasePolicy):
         raise NotImplementedError("Contextual bandits are intentionally not implemented yet")
 
 
+
+
+class LogisticTSPolicy(BasePolicy):
+    """Wrapper over contextualbandits.online.LogisticTS.
+
+    Train-once in this benchmark and no online updates.
+    """
+
+    can_update_online = False
+
+    def __init__(self, random_seed: int = 42):
+        self.random_seed = random_seed
+        self._model = None
+        self._fitted = False
+
+    @staticmethod
+    def _row_to_vector(features: list[float], action: int) -> list[float]:
+        return list(features) + [float(action)]
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        if self._fitted:
+            raise RuntimeError("LogisticTSPolicy can only be trained once")
+        if train_df.height == 0:
+            self._fitted = True
+            return
+
+        try:
+            from contextualbandits.online import LogisticTS
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("contextualbandits is required for LogisticTSPolicy") from exc
+
+        X: list[list[float]] = []
+        a: list[int] = []
+        r: list[int] = []
+        for row in train_df.iter_rows(named=True):
+            action = int(row["show"])
+            features = row["features_list"]
+            X.append(self._row_to_vector(features, action))
+            a.append(action)
+            r.append(int(float(row["reward"]) > 0.0))
+
+        if not X:
+            self._fitted = True
+            return
+
+        model = LogisticTS(random_state=self.random_seed)
+        model.fit(X, a, r)
+        self._model = model
+        self._fitted = True
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        del row
+        if not candidates:
+            raise ValueError("Empty candidate set")
+        if self._model is None:
+            return candidates[0]
+
+        # choose by highest predicted score among available candidates
+        best_action = candidates[0]
+        best_score = -1e18
+        for a in candidates:
+            x = [self._row_to_vector(features, int(a))]
+            score = float(self._model.predict_proba(x)[0]) if hasattr(self._model, "predict_proba") else float(self._model.decision_function(x)[0])
+            if score > best_score:
+                best_score = score
+                best_action = int(a)
+        return best_action
+
+
+class PartitionedTSPolicy(BasePolicy):
+    """Wrapper over contextualbandits.online.PartitionedTS.
+
+    Train-once in this benchmark and no online updates.
+    """
+
+    can_update_online = False
+
+    def __init__(self, random_seed: int = 42):
+        self.random_seed = random_seed
+        self._model = None
+        self._fitted = False
+
+    @staticmethod
+    def _row_to_vector(features: list[float], action: int) -> list[float]:
+        return list(features) + [float(action)]
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        if self._fitted:
+            raise RuntimeError("PartitionedTSPolicy can only be trained once")
+        if train_df.height == 0:
+            self._fitted = True
+            return
+
+        try:
+            from contextualbandits.online import PartitionedTS
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("contextualbandits is required for PartitionedTSPolicy") from exc
+
+        X: list[list[float]] = []
+        a: list[int] = []
+        r: list[int] = []
+        for row in train_df.iter_rows(named=True):
+            action = int(row["show"])
+            features = row["features_list"]
+            X.append(self._row_to_vector(features, action))
+            a.append(action)
+            r.append(int(float(row["reward"]) > 0.0))
+
+        if not X:
+            self._fitted = True
+            return
+
+        model = PartitionedTS(random_state=self.random_seed)
+        model.fit(X, a, r)
+        self._model = model
+        self._fitted = True
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        del row
+        if not candidates:
+            raise ValueError("Empty candidate set")
+        if self._model is None:
+            return candidates[0]
+
+        best_action = candidates[0]
+        best_score = -1e18
+        for a in candidates:
+            x = [self._row_to_vector(features, int(a))]
+            score = float(self._model.predict_proba(x)[0]) if hasattr(self._model, "predict_proba") else float(self._model.decision_function(x)[0])
+            if score > best_score:
+                best_score = score
+                best_action = int(a)
+        return best_action
+
 class CatBoostPolicy(BasePolicy):
     """Gradient boosting policy based on CatBoostClassifier.
 

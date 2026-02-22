@@ -16,8 +16,8 @@
 - `propensity = 1 / num_candidates`
 
 ## Ключевые изменения
-- Политики: `epsilon_greedy`, `ucb`, `thompson_sampling`, `catboost` (если установлен пакет `catboost`).
-- `CatBoostPolicy` обучается только один раз (`fit` повторно запрещён) и не дообучается онлайн.
+- Политики: `epsilon_greedy`, `ucb`, `thompson_sampling`, `catboost` (если установлен пакет `catboost`), `logistic_ts` и `partitioned_ts` (если установлен пакет `contextualbandits`).
+- `CatBoostPolicy`, `LogisticTSPolicy`, `PartitionedTSPolicy` обучаются только один раз (`fit` повторно запрещён) и не дообучаются онлайн.
 - Обработка данных на polars, а `metrics` и `history` возвращаются как pandas DataFrame.
 - Статистика в политиках обновляется батчами: каждые ~10% шагов теста.
 - `tqdm` обновляется не на каждом шаге, а каждые ~5% шагов.
