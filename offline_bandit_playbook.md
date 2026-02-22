@@ -37,7 +37,12 @@
 
 ## Сценарии
 - `default_five_scenarios()` — базовые 5 сценариев.
-- `default_five_ips_scenarios()` — те же 5 сценариев, но с IPS-ориентированными именами.
+- `default_five_ips_scenarios()` — те же 5 сценариев, но с IPS-ориентированными именами и запуском IPS-оценивания в раннере.
+
+## IPS-режим
+При запуске с `--ips-scenarios` раннер считает reward как IPS-оценку:
+- `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`
+- итоговый CTR = среднее IPS-наград по тесту.
 
 ## Возвращаемые результаты
 `run_scenarios(...)` возвращает dict:

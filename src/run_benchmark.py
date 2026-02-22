@@ -111,6 +111,7 @@ def main() -> None:
         scenarios=scenarios,
         env_reward=env_reward,
         show_progress=not args.no_progress,
+        use_ips=args.ips_scenarios,
     )
 
     metrics_df = result["metrics"]
