@@ -9,6 +9,7 @@ import pandas as pd
 import polars as pl
 
 from bandit_benchmark import (
+    CatBoostPolicy,
     EpsilonGreedyPolicy,
     ThompsonSamplingPolicy,
     UCBPolicy,
@@ -45,8 +46,11 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
         for algo, algo_df in part.groupby("algo"):
-            axes[0].plot(algo_df["step"], algo_df["avg_reward"], label=algo)
-            axes[1].plot(algo_df["step"], algo_df["avg_regret"], label=algo)
+            max_step = int(algo_df["step"].max()) if len(algo_df) else 0
+            stride = max(1, int(round(max_step * 0.02)))
+            ds = algo_df.iloc[stride::stride] if len(algo_df) > stride else algo_df
+            axes[0].plot(ds["step"], ds["avg_reward"], label=algo)
+            axes[1].plot(ds["step"], ds["avg_regret"], label=algo)
 
         axes[0].set_title(f"{scenario_name}: average reward")
         axes[0].set_xlabel("step")
@@ -96,6 +100,12 @@ def main() -> None:
         "ucb": lambda: UCBPolicy(),
         "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),
     }
+
+    try:
+        import catboost  # noqa: F401
+        policy_factories["catboost"] = lambda: CatBoostPolicy(random_seed=args.seed)
+    except Exception:
+        print("catboost is unavailable: skipping CatBoostPolicy")
 
     env_reward = None
     if args.simulate:

@@ -16,7 +16,8 @@
 - `propensity = 1 / num_candidates`
 
 ## Ключевые изменения
-- CatBoost убран из раннера: только `epsilon_greedy`, `ucb`, `thompson_sampling`.
+- Политики: `epsilon_greedy`, `ucb`, `thompson_sampling`, `catboost` (если установлен пакет `catboost`).
+- `CatBoostPolicy` обучается только один раз (`fit` повторно запрещён) и не дообучается онлайн.
 - Обработка данных на polars, а `metrics` и `history` возвращаются как pandas DataFrame.
 - Статистика в политиках обновляется батчами: каждые ~10% шагов теста.
 - `tqdm` обновляется не на каждом шаге, а каждые ~5% шагов.
@@ -70,3 +71,8 @@ IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 
 ## Ноутбук для запуска
 `notebooks/run_benchmark_demo.ipynb` повторяет flow из `run_benchmark.py`.
+
+
+При построении графиков используется downsampling:
+- `stride = max(1, int(round(max_step * 0.02)))`
+- `ds = algo_df.iloc[stride::stride]`
