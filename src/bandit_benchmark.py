@@ -41,8 +41,11 @@ class BasePolicy:
             self.update(a, r, f)
 
     def fit(self, train_df: pl.DataFrame) -> None:
-        for row in train_df.iter_rows(named=True):
-            self.update(int(row["show"]), float(row["reward"]), row["features_list"])
+        pending_updates = [
+            (int(r["show"]), float(r["reward"]), r["features_list"])
+            for r in train_df.iter_rows(named=True)
+        ]
+        self.update_batch(pending_updates)
 
 
 class EpsilonGreedyPolicy(BasePolicy):
@@ -601,11 +604,7 @@ def run_scenarios(
         for algo_name, make_policy in policy_factories.items():
             policy = make_policy()
             if pretrain_df.height > 0:
-                pending_pretrain: list[tuple[int, float, list[float]]] = []
-                for r in pretrain_df.iter_rows(named=True):
-                    pending_pretrain.append((int(r["show"]), float(r["reward"]), list(r["features_list"])))
-                if pending_pretrain:
-                    policy.update_batch(pending_pretrain)
+                policy.fit(pretrain_df)
 
             metrics_df, history_df = evaluate_policy(
                 policy=policy,
