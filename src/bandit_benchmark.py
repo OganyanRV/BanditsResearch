@@ -141,19 +141,12 @@ class LogisticTSPolicy(BasePolicy):
         self.r: list[int] = []
         self.f: list[list[float]] = []
 
-    def fit(self, train_df: pl.DataFrame) -> None:
-        if self._fitted:
-            raise RuntimeError("LogisticTSPolicy can only be trained once")
-        pending_updates: list[tuple[int, float, list[float]]] = []
-        for row in train_df.iter_rows(named=True):
-            pending_updates.append((int(row["show"]), float(row["reward"]), list(row["features_list"])))
-        if pending_updates:
-            self.update_batch(pending_updates)
-        self._fitted = True
-
     def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
-        from contextualbandits.online import LogisticTS
         import numpy as np
+        try:
+            from contextualbandits.online import LogisticTS
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("contextualbandits is required for LogisticTSPolicy") from exc
 
         new_actions = {int(a) for a, _, _ in pending_updates}
         if not new_actions:
@@ -165,9 +158,9 @@ class LogisticTSPolicy(BasePolicy):
                 self._actions.append(a)
 
         for a, r, f in pending_updates:
-            self.a.append(self._a2i[int(a)])
+            self.a.append(self._a2i[a])
             self.r.append(int(float(r) > 0.0))
-            self.f.append(list(f))
+            self.f.append(f)
 
         self._model = LogisticTS(
             nchoices=len(self._actions),
@@ -187,10 +180,10 @@ class LogisticTSPolicy(BasePolicy):
         ids = [self._a2i[candidate] for candidate in candidates if self._a2i.get(candidate) is not None]
         if len(ids) == 0:
             return int(np.random.choice(candidates))
-
         probs = self._model.predict(np.array(features[:50]), output_all_scores=True)
         idx_max = probs["scores"][0][ids].argmax()
         best_action = self._actions[ids[idx_max]]
+
         return int(best_action)
 
 
@@ -608,7 +601,11 @@ def run_scenarios(
         for algo_name, make_policy in policy_factories.items():
             policy = make_policy()
             if pretrain_df.height > 0:
-                policy.fit(pretrain_df)
+                pending_pretrain: list[tuple[int, float, list[float]]] = []
+                for r in pretrain_df.iter_rows(named=True):
+                    pending_pretrain.append((int(r["show"]), float(r["reward"]), list(r["features_list"])))
+                if pending_pretrain:
+                    policy.update_batch(pending_pretrain)
 
             metrics_df, history_df = evaluate_policy(
                 policy=policy,

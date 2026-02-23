@@ -18,7 +18,8 @@
 
 ## Ключевые изменения
 - Политики: `epsilon_greedy`, `ucb`, `thompson_sampling`, `catboost` (если установлен пакет `catboost`), `logistic_ts` и `partitioned_ts` (если установлен пакет `contextualbandits`).
-- `CatBoostPolicy`, `LogisticTSPolicy`, `PartitionedTSPolicy` обучаются только один раз (`fit` повторно запрещён) и не дообучаются онлайн.
+- `CatBoostPolicy` обучается один раз и не дообучается онлайн.
+`LogisticTSPolicy` и `PartitionedTSPolicy` обучаются через `update_batch(...)` на накопленных апдейтах pretrain.
 - Обработка данных на polars, а `metrics` и `history` возвращаются как pandas DataFrame.
 - Статистика в политиках обновляется батчами: каждые ~10% шагов теста.
 - `tqdm` обновляется не на каждом шаге, а каждые ~5% шагов.
