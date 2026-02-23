@@ -381,31 +381,37 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
-    # Scale feature vectors with StandardScaler when sklearn is available.
-    try:
-        import numpy as np
-        from sklearn.preprocessing import StandardScaler
-
-        feat_rows = prepared.select("features_list").to_series().to_list()
-        non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
-        if non_empty_idx:
-            dim = len(feat_rows[non_empty_idx[0]])
-            valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
-            if valid_idx:
-                X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
-                scaler = StandardScaler()
-                Xs = scaler.fit_transform(X)
-                for j, i in enumerate(valid_idx):
-                    feat_rows[i] = [float(v) for v in Xs[j].tolist()]
-                prepared = prepared.with_columns(pl.Series("features_list", feat_rows))
-    except Exception:
-        pass
-
     return prepared.with_columns(
         (pl.lit(1.0) / pl.col("candidates_list").list.len().cast(pl.Float64)).alias("propensity")
     )
 
 
+
+
+def apply_standard_scaler_to_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Scale `features_list` with StandardScaler when sklearn is available."""
+    try:
+        import numpy as np
+        from sklearn.preprocessing import StandardScaler
+
+        feat_rows = df.select("features_list").to_series().to_list()
+        non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
+        if not non_empty_idx:
+            return df
+
+        dim = len(feat_rows[non_empty_idx[0]])
+        valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
+        if not valid_idx:
+            return df
+
+        X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+        for j, i in enumerate(valid_idx):
+            feat_rows[i] = [float(v) for v in Xs[j].tolist()]
+        return df.with_columns(pl.Series("features_list", feat_rows))
+    except Exception:
+        return df
 def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
     if not 0.0 < test_ratio < 1.0:
         raise ValueError("test_ratio must be in (0,1)")

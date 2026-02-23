@@ -32,6 +32,10 @@ def load_dataset(path: str) -> pl.DataFrame:
     return pl.read_csv(path, separator="\t", schema_overrides={"candidates": pl.String})
 
 
+def load_prepared_splits(train_path: str, test_path: str) -> tuple[pl.DataFrame, pl.DataFrame]:
+    return pl.read_parquet(train_path), pl.read_parquet(test_path)
+
+
 def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
     try:
         import matplotlib.pyplot as plt
@@ -78,7 +82,9 @@ def save_plots(history_df: pd.DataFrame, out_dir: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run scenario-based benchmark for bandit policies")
-    parser.add_argument("--input", required=True, help="Path to source dataset (tsv/parquet)")
+    parser.add_argument("--input", help="Path to source dataset (tsv/parquet)")
+    parser.add_argument("--train-path", default="artifacts/datasets/train_prepared.parquet", help="Prepared train parquet")
+    parser.add_argument("--test-path", default="artifacts/datasets/test_prepared.parquet", help="Prepared test parquet")
     parser.add_argument("--test-ratio", type=float, default=0.5)
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -89,14 +95,20 @@ def main() -> None:
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     args = parser.parse_args()
 
-    raw_df = load_dataset(args.input)
-    df = preprocess_bandit_dataframe(raw_df)
-    train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
-
-    train_df = train_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
-    test_df = test_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
-
-    test_df = test_df.filter(pl.col("policy") == "random")
+    train_path = Path(args.train_path)
+    test_path = Path(args.test_path)
+    if train_path.exists() and test_path.exists():
+        train_df, test_df = load_prepared_splits(str(train_path), str(test_path))
+        print(f"loaded prepared splits: {train_path}, {test_path}")
+    else:
+        if not args.input:
+            raise ValueError("Either provide --input or prepare datasets at --train-path/--test-path")
+        raw_df = load_dataset(args.input)
+        df = preprocess_bandit_dataframe(raw_df)
+        train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
+        train_df = train_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
+        test_df = test_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
+        test_df = test_df.filter(pl.col("policy") == "random")
 
     policy_factories = {
         "epsilon_greedy": lambda: EpsilonGreedyPolicy(epsilon=args.epsilon, seed=args.seed),

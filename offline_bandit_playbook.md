@@ -79,3 +79,17 @@ IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 - `ds = algo_df.iloc[stride::stride]`
 
 Для графиков regret используется log-scale по оси Y.
+
+
+## Рекомендуемый двухшаговый пайплайн данных
+1. `python src/prepare_datasets.py --input data/events.tsv --out-dir artifacts/datasets --test-ratio 0.5`
+   - читает сырой tsv/parquet в polars
+   - делит на train/test
+   - фильтрует test по `policy == random`
+   - сохраняет `train_stage1.parquet` и `test_stage1.parquet`
+2. На втором шаге скрипт применяет `StandardScaler` к `features_list` и сохраняет финальные:
+   - `artifacts/datasets/train_prepared.parquet`
+   - `artifacts/datasets/test_prepared.parquet`
+
+Дальше для обычного запуска `run_benchmark.py` сначала пытается загрузить подготовленные split'ы с диска
+(`--train-path`, `--test-path`), и только если их нет — строит их из `--input`.
