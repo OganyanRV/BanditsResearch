@@ -32,8 +32,8 @@
 
 ## Регрет
 Регрет считается на каждом шаге по доступным действиям:
-- один раз считаем `CTR(action)` на данных, где `policy == random`
-- на шаге берём максимум только по доступным действиям `candidates`: `max_available_ctr_t = max_{a in candidates_t} CTR(a)`
+- один раз считаем `CTR(action)` на объединённых train+test данных, где `policy == random`
+- на шаге берём максимум только по доступным действиям `candidates`: `max_available_ctr_t = max_{a in candidates_t} CTR(a), fallback = max_random_ctr`
 - далее `regret_t = max_available_ctr_t - reward_t_fact`.
 
 Где `reward_t_fact`:

@@ -475,17 +475,18 @@ def evaluate_policy(
     show_progress: bool = True,
     progress_desc: str = "evaluate",
     ctr_by_action: dict[int, float] | None = None,
-    global_random_ctr: float = 0.0,
+    max_random_ctr: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
     used = 0
     replay_matches = 0
-    cumulative_regret = 0.0
-    cumulative_ips_regret = 0.0
+    cumulative_regret = 0.0  # replay regret accumulator (used only for regret metrics)
+    cumulative_ips_regret = 0.0  # IPS regret accumulator (used only for regret metrics)
     history_rows: list[dict[str, float | int]] = []
 
     action_ctr = ctr_by_action or {}
+    # Regret-only baseline fallback for unseen actions within candidate sets.
 
     total_steps = max(test_df.height, 1)
     update_chunk = max(1, int(total_steps * 0.10))
@@ -509,8 +510,9 @@ def evaluate_policy(
 
         ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
         ips_weighted_reward_sum += ips_reward
-        candidate_ctrs = [action_ctr.get(int(a), global_random_ctr) for a in candidates] if candidates else [global_random_ctr]
-        step_max_ctr = max(candidate_ctrs) if candidate_ctrs else global_random_ctr
+        # Regret-only per-step baseline: max expected CTR among currently available actions.
+        candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
+        step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
         ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
         cumulative_ips_regret += ips_step_regret
 
@@ -577,7 +579,6 @@ def evaluate_policy(
             "ips_weighted_reward": ips_weighted_reward_sum,
             "ips_ctr": ips_ctr,
             "replay_match_rate": match_rate,
-            "global_random_ctr": global_random_ctr,
             "cumulative_regret": cumulative_regret,
             "avg_regret": final_avg_regret,
             "cumulative_ips_regret": cumulative_ips_regret,
@@ -601,7 +602,9 @@ def run_scenarios(
 
     for scenario in scenarios:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
-        ctr_by_action, global_random_ctr = build_random_action_ctr_stats(train_df)
+        # Regret-only statistics are estimated from combined train+test logs.
+        ctr_source = pl.concat([train_df.select(["policy", "show", "reward"]), test_df.select(["policy", "show", "reward"])], how="vertical")
+        ctr_by_action, max_random_ctr = build_random_action_ctr_stats(ctr_source)
 
         for algo_name, make_policy in policy_factories.items():
             policy = make_policy()
@@ -616,7 +619,7 @@ def run_scenarios(
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
                 ctr_by_action=ctr_by_action,
-                global_random_ctr=global_random_ctr,
+                max_random_ctr=max_random_ctr,
             )
             metrics_df["scenario"] = scenario.name
             metrics_df["algo"] = algo_name
