@@ -12,7 +12,8 @@
 Парсинг делает `preprocess_bandit_dataframe(...)`:
 - `candidates -> candidates_list: list[int]`
 - `features -> features_list: list[float]`
-- `null/none/nan` в features заменяется на `-1e-6`
+- `features_list` дополнительно нормализуется через `StandardScaler()` (если доступен sklearn)
+- `null/none/nan` в features заменяется на `0.0`
 - `propensity = 1 / num_candidates`
 
 ## Ключевые изменения
