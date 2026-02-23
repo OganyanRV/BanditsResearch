@@ -16,7 +16,7 @@ from bandit_benchmark import (
     ThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
-    default_five_ips_scenarios,
+    core_scenarios,
     default_five_scenarios,
     make_simulated_environment,
     preprocess_bandit_dataframe,
@@ -90,9 +90,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
     parser.add_argument("--stochastic-sim", action="store_true", help="In simulation, sample Bernoulli reward")
-    parser.add_argument("--ips-scenarios", action="store_true", help="Run IPS-oriented five scenarios naming")
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
+    parser.add_argument("--full-scenarios", action="store_true", help="Run full five scenarios instead of core")
     args = parser.parse_args()
 
     train_path = Path(args.train_path)
@@ -134,7 +134,7 @@ def main() -> None:
         expected_fn = build_expected_reward_estimator(train_df)
         env_reward = make_simulated_environment(proba_predictor=expected_fn, stochastic=args.stochastic_sim, seed=args.seed)
 
-    scenarios = default_five_ips_scenarios() if args.ips_scenarios else default_five_scenarios()
+    scenarios = default_five_scenarios() if args.full_scenarios else core_scenarios()
 
     result = run_scenarios(
         train_df=train_df,

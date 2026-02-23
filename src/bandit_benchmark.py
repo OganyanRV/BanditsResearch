@@ -656,12 +656,6 @@ def default_five_scenarios() -> list[ScenarioConfig]:
     ]
 
 
-def default_five_ips_scenarios() -> list[ScenarioConfig]:
-    """Same 5 scenarios, but intended for IPS evaluation on random-policy test slice."""
-    return [
-        ScenarioConfig("ips_case_1_random_pretrain_predict_only", "random", False),
-        ScenarioConfig("ips_case_2_random_pretrain_online_update", "random", True),
-        ScenarioConfig("ips_case_3_all_pretrain_predict_only", "all", False),
-        ScenarioConfig("ips_case_4_all_pretrain_online_update", "all", True),
-        ScenarioConfig("ips_case_5_no_pretrain_online_update", "none", True),
-    ]
+def core_scenarios() -> list[ScenarioConfig]:
+    return [ScenarioConfig("case_2_random_pretrain_online_update", "random", True)]
+

@@ -42,8 +42,8 @@
 - для IPS-трека — фактический reward, если был матч, иначе 0.
 
 ## Сценарии
-- `default_five_scenarios()` — базовые 5 сценариев.
-- `default_five_ips_scenarios()` — те же 5 сценариев, но с IPS-ориентированными именами и запуском IPS-оценивания в раннере.
+- `core_scenarios()` — дефолтный минимальный сценарий: `case_2_random_pretrain_online_update`.
+- `default_five_scenarios()` — полный набор из 5 сценариев.
 
 ## IPS-статистики (считаются одновременно)
 Раннер всегда считает две ветки метрик одновременно:
@@ -63,7 +63,8 @@ IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 
 Примеры:
 - `python src/run_benchmark.py --input data/events.tsv --test-ratio 0.2`
-- `python src/run_benchmark.py --input data/events.tsv --ips-scenarios`
+- `python src/run_benchmark.py --input data/events.tsv`  # по умолчанию core
+- `python src/run_benchmark.py --input data/events.tsv --full-scenarios`
 - `python src/run_benchmark.py --input data/events.tsv --simulate --stochastic-sim`
 
 Артефакты:
