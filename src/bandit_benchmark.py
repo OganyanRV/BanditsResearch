@@ -137,62 +137,61 @@ class LogisticTSPolicy(BasePolicy):
         self._actions: list[int] = []
         self._a2i: dict[int, int] = {}
 
+        self.a: list[int] = []
+        self.r: list[int] = []
+        self.f: list[list[float]] = []
+
     def fit(self, train_df: pl.DataFrame) -> None:
         if self._fitted:
             raise RuntimeError("LogisticTSPolicy can only be trained once")
-        if train_df.height == 0:
-            self._fitted = True
-            return
-
-        try:
-            from contextualbandits.online import LogisticTS
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("contextualbandits is required for LogisticTSPolicy") from exc
-
-        actions = sorted({int(r["show"]) for r in train_df.iter_rows(named=True)})
-        if not actions:
-            self._fitted = True
-            return
-        self._actions = actions
-        self._a2i = {a: i for i, a in enumerate(actions)}
-
-        X: list[list[float]] = []
-        a: list[int] = []
-        r: list[int] = []
+        pending_updates: list[tuple[int, float, list[float]]] = []
         for row in train_df.iter_rows(named=True):
-            action = int(row["show"])
-            if action not in self._a2i:
-                continue
-            X.append(list(row["features_list"]))
-            a.append(self._a2i[action])
-            r.append(int(float(row["reward"]) > 0.0))
-
-        if not X:
-            self._fitted = True
-            return
-
-        model = LogisticTS(nchoices=len(self._actions), random_state=self.random_seed)
-        model.fit(X, a, r)
-        self._model = model
+            pending_updates.append((int(row["show"]), float(row["reward"]), list(row["features_list"])))
+        if pending_updates:
+            self.update_batch(pending_updates)
         self._fitted = True
 
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        from contextualbandits.online import LogisticTS
+        import numpy as np
+
+        new_actions = {int(a) for a, _, _ in pending_updates}
+        if not new_actions:
+            raise ValueError("pending_updates contains no actions")
+
+        for a in new_actions:
+            if a not in self._a2i:
+                self._a2i[a] = len(self._actions)
+                self._actions.append(a)
+
+        for a, r, f in pending_updates:
+            self.a.append(self._a2i[int(a)])
+            self.r.append(int(float(r) > 0.0))
+            self.f.append(list(f))
+
+        self._model = LogisticTS(
+            nchoices=len(self._actions),
+            random_state=self.random_seed,
+        )
+        self._model.fit(np.array(self.f)[:, :50], np.array(self.a), np.array(self.r))
+
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        import numpy as np
+
         del row
         if not candidates:
             raise ValueError("Empty candidate set")
         if self._model is None:
-            return candidates[0]
+            return int(np.random.choice(candidates))
 
-        probs = self._model.predict_proba([list(features)])[0]
-        best_action = candidates[0]
-        best_score = -1e18
-        for a in candidates:
-            idx = self._a2i.get(int(a))
-            score = float(probs[idx]) if idx is not None else 0.0
-            if score > best_score:
-                best_score = score
-                best_action = int(a)
-        return best_action
+        ids = [self._a2i[candidate] for candidate in candidates if self._a2i.get(candidate) is not None]
+        if len(ids) == 0:
+            return int(np.random.choice(candidates))
+
+        probs = self._model.predict(np.array(features[:50]), output_all_scores=True)
+        idx_max = probs["scores"][0][ids].argmax()
+        best_action = self._actions[ids[idx_max]]
+        return int(best_action)
 
 
 class PartitionedTSPolicy(BasePolicy):
