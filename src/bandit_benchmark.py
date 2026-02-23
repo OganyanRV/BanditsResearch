@@ -33,6 +33,19 @@ class BasePolicy:
         del candidates, features, row
         raise NotImplementedError
 
+    def select_batch(
+        self,
+        candidates_batch: list[list[Action]],
+        features_batch: list[list[float]],
+        rows_batch: list[dict[str, object]],
+    ) -> list[Action]:
+        if not (len(candidates_batch) == len(features_batch) == len(rows_batch)):
+            raise ValueError("Batch inputs must have equal length")
+        return [
+            int(self.select(candidates, features, row))
+            for candidates, features, row in zip(candidates_batch, features_batch, rows_batch)
+        ]
+
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
 
@@ -494,64 +507,77 @@ def evaluate_policy(
     pending_updates: list[tuple[int, float, list[float]]] = []
     next_progress_mark = progress_chunk
 
-    for step, row in enumerate(test_df.iter_rows(named=True), start=1):
-        candidates = row["candidates_list"]
-        features = row["features_list"]
-        action = int(policy.select(candidates, features, row))
+    test_rows = list(test_df.iter_rows(named=True))
 
-        logged_reward = float(row["reward"])
-        logged_match = int(action == int(row["show"]))
-        propensity = float(row.get("propensity", 0.0) or 0.0)
+    batch_size = max(1, min(512, update_chunk))
 
-        ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
-        ips_weighted_reward_sum += ips_reward
-        # Regret-only per-step baseline: max expected CTR among currently available actions.
-        candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
-        step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
-        ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
-        cumulative_ips_regret += ips_step_regret
+    for batch_start in range(0, len(test_rows), batch_size):
+        rows_batch = test_rows[batch_start : batch_start + batch_size]
+        candidates_batch = [row["candidates_list"] for row in rows_batch]
+        features_batch = [row["features_list"] for row in rows_batch]
+        actions_batch = policy.select_batch(candidates_batch, features_batch, rows_batch)
+        if len(actions_batch) != len(rows_batch):
+            raise ValueError("select_batch must return one action per input row")
 
-        if env_reward is None:
-            if not logged_match:
-                if pbar is not None and step >= next_progress_mark:
-                    pbar.update(step - pbar.n)
-                    next_progress_mark += progress_chunk
-                continue
-            reward = logged_reward
-            replay_matches += 1
-            regret = step_max_ctr - reward
-        else:
-            reward = float(env_reward(row, action))
-            replay_matches += int(action == int(row["show"]))
-            regret = step_max_ctr - reward
+        for offset, row in enumerate(rows_batch):
+            step = batch_start + offset + 1
+            candidates = candidates_batch[offset]
+            features = features_batch[offset]
+            action = int(actions_batch[offset])
 
-        total_reward += reward
-        cumulative_regret += regret
-        used += 1
+            logged_reward = float(row["reward"])
+            logged_match = int(action == int(row["show"]))
+            propensity = float(row.get("propensity", 0.0) or 0.0)
 
-        if online_update and policy.can_update_online:
-            pending_updates.append((action, reward, features))
-            if len(pending_updates) >= update_chunk:
-                policy.update_batch(pending_updates)
-                pending_updates.clear()
+            ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
+            ips_weighted_reward_sum += ips_reward
+            # Regret-only per-step baseline: max expected CTR among currently available actions.
+            candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
+            step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
+            ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
+            cumulative_ips_regret += ips_step_regret
 
-        history_rows.append(
-            {
-                "step": step,
-                "reward": reward,
-                "avg_reward": total_reward / used,
-                "ips_reward": ips_reward,
-                "ips_avg_reward": ips_weighted_reward_sum / step,
-                "cumulative_regret": cumulative_regret,
-                "avg_regret": cumulative_regret / used,
-                "cumulative_ips_regret": cumulative_ips_regret,
-                "avg_ips_regret": cumulative_ips_regret / step,
-            }
-        )
+            if env_reward is None:
+                if not logged_match:
+                    if pbar is not None and step >= next_progress_mark:
+                        pbar.update(step - pbar.n)
+                        next_progress_mark += progress_chunk
+                    continue
+                reward = logged_reward
+                replay_matches += 1
+                regret = step_max_ctr - reward
+            else:
+                reward = float(env_reward(row, action))
+                replay_matches += int(action == int(row["show"]))
+                regret = step_max_ctr - reward
 
-        if pbar is not None and step >= next_progress_mark:
-            pbar.update(step - pbar.n)
-            next_progress_mark += progress_chunk
+            total_reward += reward
+            cumulative_regret += regret
+            used += 1
+
+            if online_update and policy.can_update_online:
+                pending_updates.append((action, reward, features))
+                if len(pending_updates) >= update_chunk:
+                    policy.update_batch(pending_updates)
+                    pending_updates.clear()
+
+            history_rows.append(
+                {
+                    "step": step,
+                    "reward": reward,
+                    "avg_reward": total_reward / used,
+                    "ips_reward": ips_reward,
+                    "ips_avg_reward": ips_weighted_reward_sum / step,
+                    "cumulative_regret": cumulative_regret,
+                    "avg_regret": cumulative_regret / used,
+                    "cumulative_ips_regret": cumulative_ips_regret,
+                    "avg_ips_regret": cumulative_ips_regret / step,
+                }
+            )
+
+            if pbar is not None and step >= next_progress_mark:
+                pbar.update(step - pbar.n)
+                next_progress_mark += progress_chunk
 
     if pending_updates:
         policy.update_batch(pending_updates)
@@ -658,4 +684,3 @@ def default_five_scenarios() -> list[ScenarioConfig]:
 
 def core_scenarios() -> list[ScenarioConfig]:
     return [ScenarioConfig("case_2_random_pretrain_online_update", "random", True)]
-
