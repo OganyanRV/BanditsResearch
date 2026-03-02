@@ -29,6 +29,10 @@ class ScenarioConfig:
 class BasePolicy:
     can_update_online: bool = True
 
+    def __init__(self, can_update_online: bool | None = None):
+        if can_update_online is not None:
+            self.can_update_online = can_update_online
+
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
         raise NotImplementedError
@@ -64,7 +68,8 @@ class BasePolicy:
 class RandomPolicy(BasePolicy):
     can_update_online = False
 
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.rng = random.Random(seed)
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
@@ -76,7 +81,8 @@ class RandomPolicy(BasePolicy):
 
 
 class EpsilonGreedyPolicy(BasePolicy):
-    def __init__(self, epsilon: float = 0.1, seed: int = 42):
+    def __init__(self, epsilon: float = 0.1, seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.epsilon = epsilon
         self.rng = random.Random(seed)
         self.counts: dict[Action, int] = {}
@@ -99,7 +105,8 @@ class EpsilonGreedyPolicy(BasePolicy):
 
 
 class UCBPolicy(BasePolicy):
-    def __init__(self, exploration: float = 2.0):
+    def __init__(self, exploration: float = 2.0, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.exploration = exploration
         self.t = 0
         self.counts: dict[Action, int] = {}
@@ -125,7 +132,8 @@ class UCBPolicy(BasePolicy):
 
 
 class ThompsonSamplingPolicy(BasePolicy):
-    def __init__(self, alpha: float = 1.0, beta: float = 1.0, seed: int = 42):
+    def __init__(self, alpha: float = 1.0, beta: float = 1.0, seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.alpha0 = alpha
         self.beta0 = beta
         self.rng = random.Random(seed)
@@ -152,21 +160,41 @@ class ContextualBanditPlaceholder(BasePolicy):
 
 
 
-class LogisticTSPolicy(BasePolicy):
-    """Wrapper over contextualbandits.online.LogisticTS.
-
-    Train-once in this benchmark and no online updates.
-    """
-
-    can_update_online = False
-
-    def __init__(self, random_seed: int = 42):
-        self.random_seed = random_seed
+class _ContextualTSLibPolicyBase(BasePolicy):
+    def __init__(self, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self._model = None
         self._fitted = False
         self._actions: list[int] = []
         self._a2i: dict[int, int] = {}
 
+    def _build_action_index(self, rows: list[dict[str, object]]) -> None:
+        actions = sorted({int(r["show"]) for r in rows})
+        self._actions = actions
+        self._a2i = {a: i for i, a in enumerate(actions)}
+
+    def _select_from_score_vector(self, candidates: list[Action], scores: list[float]) -> Action:
+        if not candidates:
+            raise ValueError("Empty candidate set")
+        best_action = candidates[0]
+        best_score = -1e18
+        for a in candidates:
+            idx = self._a2i.get(int(a))
+            score = float(scores[idx]) if idx is not None else 0.0
+            if score > best_score:
+                best_score = score
+                best_action = int(a)
+        return best_action
+
+
+class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
+    """Wrapper over contextualbandits.online.LogisticTS."""
+
+    can_update_online = False
+
+    def __init__(self, random_seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
+        self.random_seed = random_seed
         self.a: list[int] = []
         self.r: list[int] = []
         self.f: list[list[float]] = []
@@ -176,7 +204,7 @@ class LogisticTSPolicy(BasePolicy):
         try:
             from contextualbandits.online import LogisticTS
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("contextualbandits is required for LogisticTSPolicy") from exc
+            raise RuntimeError("contextualbandits is required for LogisticTSLibPolicy") from exc
 
         new_actions = {int(a) for a, _, _ in pending_updates}
         if not new_actions:
@@ -192,10 +220,7 @@ class LogisticTSPolicy(BasePolicy):
             self.r.append(int(float(r) > 0.0))
             self.f.append(f)
 
-        self._model = LogisticTS(
-            nchoices=len(self._actions),
-            random_state=self.random_seed,
-        )
+        self._model = LogisticTS(nchoices=len(self._actions), random_state=self.random_seed)
         self._model.fit(np.array(self.f)[:, :50], np.array(self.a), np.array(self.r))
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
@@ -213,7 +238,6 @@ class LogisticTSPolicy(BasePolicy):
         probs = self._model.predict(np.array(features[:50]), output_all_scores=True)
         idx_max = probs["scores"][0][ids].argmax()
         best_action = self._actions[ids[idx_max]]
-
         return int(best_action)
 
     def select_batch(
@@ -226,9 +250,7 @@ class LogisticTSPolicy(BasePolicy):
 
         if not (len(candidates_batch) == len(features_batch) == len(rows_batch)):
             raise ValueError("Batch inputs must have equal length")
-
-        n = len(candidates_batch)
-        if n == 0:
+        if len(candidates_batch) == 0:
             return []
 
         del rows_batch
@@ -256,13 +278,12 @@ class LogisticTSPolicy(BasePolicy):
 
             row_scores = scores[i]
             best_local = int(np.argmax(row_scores[ids]))
-            best_action = self._actions[ids[best_local]]
-            out.append(int(best_action))
+            out.append(int(self._actions[ids[best_local]]))
 
         return out
 
 
-class PartitionedTSPolicy(BasePolicy):
+class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
     """Wrapper over contextualbandits.online.PartitionedTS.
 
     Train-once in this benchmark and no online updates.
@@ -270,16 +291,13 @@ class PartitionedTSPolicy(BasePolicy):
 
     can_update_online = False
 
-    def __init__(self, random_seed: int = 42):
+    def __init__(self, random_seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.random_seed = random_seed
-        self._model = None
-        self._fitted = False
-        self._actions: list[int] = []
-        self._a2i: dict[int, int] = {}
 
     def fit(self, train_df: pl.DataFrame) -> None:
         if self._fitted:
-            raise RuntimeError("PartitionedTSPolicy can only be trained once")
+            raise RuntimeError("PartitionedTSLibPolicy can only be trained once")
         if train_df.height == 0:
             self._fitted = True
             return
@@ -287,19 +305,18 @@ class PartitionedTSPolicy(BasePolicy):
         try:
             from contextualbandits.online import PartitionedTS
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("contextualbandits is required for PartitionedTSPolicy") from exc
+            raise RuntimeError("contextualbandits is required for PartitionedTSLibPolicy") from exc
 
-        actions = sorted({int(r["show"]) for r in train_df.iter_rows(named=True)})
-        if not actions:
+        rows = list(train_df.iter_rows(named=True))
+        self._build_action_index(rows)
+        if not self._actions:
             self._fitted = True
             return
-        self._actions = actions
-        self._a2i = {a: i for i, a in enumerate(actions)}
 
         X: list[list[float]] = []
         a: list[int] = []
         r: list[int] = []
-        for row in train_df.iter_rows(named=True):
+        for row in rows:
             action = int(row["show"])
             if action not in self._a2i:
                 continue
@@ -324,15 +341,12 @@ class PartitionedTSPolicy(BasePolicy):
             return candidates[0]
 
         probs = self._model.predict_proba([list(features)])[0]
-        best_action = candidates[0]
-        best_score = -1e18
-        for a in candidates:
-            idx = self._a2i.get(int(a))
-            score = float(probs[idx]) if idx is not None else 0.0
-            if score > best_score:
-                best_score = score
-                best_action = int(a)
-        return best_action
+        return self._select_from_score_vector(candidates, probs)
+
+
+# Backward-compatible aliases
+LogisticTSPolicy = LogisticTSLibPolicy
+PartitionedTSPolicy = PartitionedTSLibPolicy
 
 
 class CatBoostPolicy(BasePolicy):
@@ -343,7 +357,8 @@ class CatBoostPolicy(BasePolicy):
 
     can_update_online = False
 
-    def __init__(self, random_seed: int = 42):
+    def __init__(self, random_seed: int = 42, can_update_online: bool | None = None):
+        super().__init__(can_update_online=can_update_online)
         self.random_seed = random_seed
         self._model = None
         self._fitted = False

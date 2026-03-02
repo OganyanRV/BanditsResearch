@@ -11,9 +11,9 @@ import polars as pl
 from bandit_benchmark import (
     CatBoostPolicy,
     EpsilonGreedyPolicy,
-    LogisticTSPolicy,
+    LogisticTSLibPolicy,
     RandomPolicy,
-    PartitionedTSPolicy,
+    PartitionedTSLibPolicy,
     ThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
@@ -126,8 +126,8 @@ def main() -> None:
 
     try:
         import contextualbandits  # noqa: F401
-        policy_factories["logistic_ts"] = lambda: LogisticTSPolicy(random_seed=args.seed)
-        policy_factories["partitioned_ts"] = lambda: PartitionedTSPolicy(random_seed=args.seed)
+        policy_factories["logistic_ts"] = lambda: LogisticTSLibPolicy(random_seed=args.seed)
+        policy_factories["partitioned_ts"] = lambda: PartitionedTSLibPolicy(random_seed=args.seed)
     except Exception:
         print("contextualbandits is unavailable: skipping LogisticTS/PartitionedTS")
 
