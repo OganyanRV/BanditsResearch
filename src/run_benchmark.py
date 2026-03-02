@@ -12,6 +12,7 @@ from bandit_benchmark import (
     CatBoostPolicy,
     EpsilonGreedyPolicy,
     LogisticTSPolicy,
+    RandomPolicy,
     PartitionedTSPolicy,
     ThompsonSamplingPolicy,
     UCBPolicy,
@@ -111,6 +112,7 @@ def main() -> None:
         test_df = test_df.filter(pl.col("policy") == "random")
 
     policy_factories = {
+        "random": lambda: RandomPolicy(seed=args.seed),
         "epsilon_greedy": lambda: EpsilonGreedyPolicy(epsilon=args.epsilon, seed=args.seed),
         "ucb": lambda: UCBPolicy(),
         "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),

@@ -61,6 +61,20 @@ class BasePolicy:
         self.update_batch(pending_updates)
 
 
+class RandomPolicy(BasePolicy):
+    can_update_online = False
+
+    def __init__(self, seed: int = 42):
+        self.rng = random.Random(seed)
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        del features, row
+        if not candidates:
+            raise ValueError("Empty candidate set")
+        return int(self.rng.choice(candidates))
+
+
+
 class EpsilonGreedyPolicy(BasePolicy):
     def __init__(self, epsilon: float = 0.1, seed: int = 42):
         self.epsilon = epsilon
