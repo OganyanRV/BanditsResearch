@@ -543,7 +543,7 @@ def evaluate_policy(
     progress_desc: str = "evaluate",
     ctr_by_action: dict[int, float] | None = None,
     max_random_ctr: float = 0.0,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
     used = 0
@@ -551,6 +551,7 @@ def evaluate_policy(
     cumulative_regret = 0.0  # replay regret accumulator (used only for regret metrics)
     cumulative_ips_regret = 0.0  # IPS regret accumulator (used only for regret metrics)
     history_rows: list[dict[str, float | int]] = []
+    action_stats_rows: list[dict[str, int]] = []
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -648,6 +649,13 @@ def evaluate_policy(
                     f"unique_actions_total={len(seen_actions)}, "
                     f"unique_actions_new_since_prev_chunk={len(new_since_prev_chunk)}"
                 )
+                action_stats_rows.append(
+                    {
+                        "step": step,
+                        "unique_actions_total": len(seen_actions),
+                        "unique_actions_new_since_prev_chunk": len(new_since_prev_chunk),
+                    }
+                )
                 if pbar is not None:
                     pbar.write(msg)
                 else:
@@ -682,7 +690,8 @@ def evaluate_policy(
         }
     ])
     history_df = pd.DataFrame(history_rows)
-    return metrics_df, history_df
+    action_stats_df = pd.DataFrame(action_stats_rows)
+    return metrics_df, history_df, action_stats_df
 
 
 def run_scenarios(
@@ -695,6 +704,7 @@ def run_scenarios(
 ) -> dict[str, pd.DataFrame]:
     metrics_parts: list[pd.DataFrame] = []
     history_parts: list[pd.DataFrame] = []
+    action_stats_parts: list[pd.DataFrame] = []
 
     for scenario in scenarios:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
@@ -707,7 +717,7 @@ def run_scenarios(
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
-            metrics_df, history_df = evaluate_policy(
+            metrics_df, history_df, action_stats_df = evaluate_policy(
                 policy=policy,
                 test_df=test_df,
                 online_update=scenario.online_update,
@@ -726,9 +736,15 @@ def run_scenarios(
                 history_df["algo"] = algo_name
                 history_parts.append(history_df)
 
+            if not action_stats_df.empty:
+                action_stats_df["scenario"] = scenario.name
+                action_stats_df["algo"] = algo_name
+                action_stats_parts.append(action_stats_df)
+
     out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
     out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
-    return {"metrics": out_metrics, "history": out_history}
+    out_action_stats = pd.concat(action_stats_parts, ignore_index=True) if action_stats_parts else pd.DataFrame()
+    return {"metrics": out_metrics, "history": out_history, "action_stats": out_action_stats}
 
 
 def make_simulated_environment(
