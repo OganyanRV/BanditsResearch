@@ -688,9 +688,6 @@ def evaluate_policy(
                 next_progress_mark += progress_chunk
 
 
-    if online_update and policy.can_update_online and pending_updates:
-        policy.update_batch(pending_updates)
-
     if current_day_actions:
         new_actions_in_day = current_day_actions - seen_actions_total
         seen_actions_total.update(current_day_actions)
