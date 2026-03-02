@@ -557,7 +557,6 @@ def evaluate_policy(
     # Regret-only baseline fallback for unseen actions within candidate sets.
 
     total_steps = max(test_df.height, 1)
-    update_chunk = max(1, int(total_steps * 0.10))
     progress_chunk = max(1, int(total_steps * 0.05))
 
     pbar = None
@@ -568,10 +567,11 @@ def evaluate_policy(
     next_progress_mark = progress_chunk
     seen_actions: set[int] = set()
     seen_actions_prev_checkpoint: set[int] = set()
+    prev_date = None
 
     test_rows = list(test_df.iter_rows(named=True))
 
-    batch_size = max(1, min(512, update_chunk))
+    batch_size = 512
 
     for batch_start in range(0, len(test_rows), batch_size):
         rows_batch = test_rows[batch_start : batch_start + batch_size]
@@ -585,6 +585,31 @@ def evaluate_policy(
             step = batch_start + offset + 1
             candidates = candidates_batch[offset]
             features = features_batch[offset]
+            current_date = row.get("date")
+            if prev_date is not None and current_date is not None and current_date > prev_date:
+                if online_update and policy.can_update_online and pending_updates:
+                    policy.update_batch(pending_updates)
+                    pending_updates.clear()
+                new_since_prev_update = seen_actions - seen_actions_prev_checkpoint
+                msg = (
+                    f"{progress_desc}: step={step}, date_changed=True, "
+                    f"unique_actions_total={len(seen_actions)}, "
+                    f"unique_actions_new_since_prev_update={len(new_since_prev_update)}"
+                )
+                action_stats_rows.append(
+                    {
+                        "step": step,
+                        "unique_actions_total": len(seen_actions),
+                        "unique_actions_new_since_prev_update": len(new_since_prev_update),
+                    }
+                )
+                if pbar is not None:
+                    pbar.write(msg)
+                else:
+                    print(msg)
+                seen_actions_prev_checkpoint = set(seen_actions)
+            prev_date = current_date if current_date is not None else prev_date
+
             action = int(actions_batch[offset])
             seen_actions.add(action)
 
@@ -620,9 +645,6 @@ def evaluate_policy(
 
             if online_update and policy.can_update_online:
                 pending_updates.append((action, reward, features))
-                if len(pending_updates) >= update_chunk:
-                    policy.update_batch(pending_updates)
-                    pending_updates.clear()
 
             history_rows.append(
                 {
@@ -642,28 +664,29 @@ def evaluate_policy(
                 pbar.update(step - pbar.n)
                 next_progress_mark += progress_chunk
 
-            if step % update_chunk == 0:
-                new_since_prev_chunk = seen_actions - seen_actions_prev_checkpoint
-                msg = (
-                    f"{progress_desc}: step={step}, "
-                    f"unique_actions_total={len(seen_actions)}, "
-                    f"unique_actions_new_since_prev_chunk={len(new_since_prev_chunk)}"
-                )
-                action_stats_rows.append(
-                    {
-                        "step": step,
-                        "unique_actions_total": len(seen_actions),
-                        "unique_actions_new_since_prev_chunk": len(new_since_prev_chunk),
-                    }
-                )
-                if pbar is not None:
-                    pbar.write(msg)
-                else:
-                    print(msg)
-                seen_actions_prev_checkpoint = set(seen_actions)
 
-    if pending_updates:
+    if online_update and policy.can_update_online and pending_updates:
         policy.update_batch(pending_updates)
+
+    new_since_prev_update = seen_actions - seen_actions_prev_checkpoint
+    if seen_actions and new_since_prev_update:
+        final_step = test_df.height
+        msg = (
+            f"{progress_desc}: step={final_step}, date_changed=False, "
+            f"unique_actions_total={len(seen_actions)}, "
+            f"unique_actions_new_since_prev_update={len(new_since_prev_update)}"
+        )
+        action_stats_rows.append(
+            {
+                "step": final_step,
+                "unique_actions_total": len(seen_actions),
+                "unique_actions_new_since_prev_update": len(new_since_prev_update),
+            }
+        )
+        if pbar is not None:
+            pbar.write(msg)
+        else:
+            print(msg)
 
     if pbar is not None:
         pbar.update(test_df.height - pbar.n)

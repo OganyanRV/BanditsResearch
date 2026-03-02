@@ -165,7 +165,7 @@ def main() -> None:
     print(f"saved action stats: {action_stats_path}")
     print(metrics_df)
     if args.simulate:
-        print("action stats (update-chunk checkpoints):")
+        print("action stats (date-change checkpoints):")
         print(action_stats_df)
 
     plot_paths = save_plots(history_df, str(out_dir / "plots"))
