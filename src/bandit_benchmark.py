@@ -347,10 +347,16 @@ class CatBoostPolicy(BasePolicy):
         self.random_seed = random_seed
         self._model = None
         self._fitted = False
+        self._actions: list[int] = []
+        self._a2i: dict[int, int] = {}
 
-    @staticmethod
-    def _row_to_vector(features: list[float], action: int) -> list[float]:
-        return list(features) + [float(action)]
+    def _row_to_vector(self, features: list[float], action: int) -> list[float]:
+        vec = list(features)
+        one_hot = [0.0] * len(self._actions)
+        idx = self._a2i.get(int(action))
+        if idx is not None:
+            one_hot[idx] = 1.0
+        return vec + one_hot
 
     def fit(self, train_df: pl.DataFrame) -> None:
         if self._fitted:
@@ -363,6 +369,10 @@ class CatBoostPolicy(BasePolicy):
             from catboost import CatBoostClassifier
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("catboost is required for CatBoostPolicy") from exc
+
+        actions = sorted({int(r["show"]) for r in train_df.iter_rows(named=True)})
+        self._actions = actions
+        self._a2i = {a: i for i, a in enumerate(actions)}
 
         X: list[list[float]] = []
         y: list[int] = []
