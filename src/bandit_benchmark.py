@@ -567,9 +567,11 @@ def evaluate_policy(
     next_progress_mark = progress_chunk
     seen_actions: set[int] = set()
     seen_actions_prev_checkpoint: set[int] = set()
-    prev_date = None
 
     test_rows = list(test_df.iter_rows(named=True))
+    first_row_date = test_rows[0].get("date") if test_rows else None
+    current_date = first_row_date
+    prev_date = first_row_date
 
     batch_size = 512
 
