@@ -202,6 +202,51 @@ class LogisticTSPolicy(BasePolicy):
 
         return int(best_action)
 
+    def select_batch(
+        self,
+        candidates_batch: list[list[Action]],
+        features_batch: list[list[float]],
+        rows_batch: list[dict[str, object]],
+    ) -> list[Action]:
+        import numpy as np
+
+        if not (len(candidates_batch) == len(features_batch) == len(rows_batch)):
+            raise ValueError("Batch inputs must have equal length")
+
+        n = len(candidates_batch)
+        if n == 0:
+            return []
+
+        del rows_batch
+
+        if self._model is None:
+            out_random: list[Action] = []
+            for cands in candidates_batch:
+                if not cands:
+                    raise ValueError("Empty candidate set in batch")
+                out_random.append(int(np.random.choice(cands)))
+            return out_random
+
+        X = np.asarray([f[:50] for f in features_batch], dtype=np.float64)
+        probs = self._model.predict(X, output_all_scores=True)
+        scores = probs["scores"]
+
+        out: list[Action] = []
+        for i, candidates in enumerate(candidates_batch):
+            if not candidates:
+                raise ValueError("Empty candidate set in batch")
+            ids = [self._a2i[candidate] for candidate in candidates if self._a2i.get(candidate) is not None]
+            if not ids:
+                out.append(int(np.random.choice(candidates)))
+                continue
+
+            row_scores = scores[i]
+            best_local = int(np.argmax(row_scores[ids]))
+            best_action = self._actions[ids[best_local]]
+            out.append(int(best_action))
+
+        return out
+
 
 class PartitionedTSPolicy(BasePolicy):
     """Wrapper over contextualbandits.online.PartitionedTS.
