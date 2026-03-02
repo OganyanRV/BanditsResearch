@@ -543,6 +543,7 @@ def evaluate_policy(
     progress_desc: str = "evaluate",
     ctr_by_action: dict[int, float] | None = None,
     max_random_ctr: float = 0.0,
+    initial_seen_actions: set[int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
@@ -565,13 +566,19 @@ def evaluate_policy(
 
     pending_updates: list[tuple[int, float, list[float]]] = []
     next_progress_mark = progress_chunk
-    seen_actions: set[int] = set()
-    seen_actions_prev_checkpoint: set[int] = set()
+    seen_actions_total: set[int] = set(initial_seen_actions or set())
+    current_day_actions: set[int] = set()
 
     test_rows = list(test_df.iter_rows(named=True))
     first_row_date = test_rows[0].get("date") if test_rows else None
-    current_date = first_row_date
     prev_date = first_row_date
+
+    if show_progress:
+        msg = f"{progress_desc}: train_unique_actions={len(seen_actions_total)}"
+        if pbar is not None:
+            pbar.write(msg)
+        else:
+            print(msg)
 
     batch_size = 512
 
@@ -592,28 +599,32 @@ def evaluate_policy(
                 if online_update and policy.can_update_online and pending_updates:
                     policy.update_batch(pending_updates)
                     pending_updates.clear()
-                new_since_prev_update = seen_actions - seen_actions_prev_checkpoint
+
+                new_actions_in_day = current_day_actions - seen_actions_total
+                seen_actions_total.update(current_day_actions)
                 msg = (
-                    f"{progress_desc}: step={step}, date_changed=True, "
-                    f"unique_actions_total={len(seen_actions)}, "
-                    f"unique_actions_new_since_prev_update={len(new_since_prev_update)}"
+                    f"{progress_desc}: step={step}, date={prev_date}, "
+                    f"unique_actions_total={len(seen_actions_total)}, "
+                    f"unique_actions_new_in_day={len(new_actions_in_day)}"
                 )
                 action_stats_rows.append(
                     {
                         "step": step,
-                        "unique_actions_total": len(seen_actions),
-                        "unique_actions_new_since_prev_update": len(new_since_prev_update),
+                        "date": prev_date,
+                        "unique_actions_total": len(seen_actions_total),
+                        "unique_actions_new_in_day": len(new_actions_in_day),
                     }
                 )
                 if pbar is not None:
                     pbar.write(msg)
                 else:
                     print(msg)
-                seen_actions_prev_checkpoint = set(seen_actions)
+                current_day_actions.clear()
+
             prev_date = current_date if current_date is not None else prev_date
 
             action = int(actions_batch[offset])
-            seen_actions.add(action)
+            current_day_actions.add(action)
 
             logged_reward = float(row["reward"])
             logged_match = int(action == int(row["show"]))
@@ -670,19 +681,21 @@ def evaluate_policy(
     if online_update and policy.can_update_online and pending_updates:
         policy.update_batch(pending_updates)
 
-    new_since_prev_update = seen_actions - seen_actions_prev_checkpoint
-    if seen_actions and new_since_prev_update:
+    if current_day_actions:
+        new_actions_in_day = current_day_actions - seen_actions_total
+        seen_actions_total.update(current_day_actions)
         final_step = test_df.height
         msg = (
-            f"{progress_desc}: step={final_step}, date_changed=False, "
-            f"unique_actions_total={len(seen_actions)}, "
-            f"unique_actions_new_since_prev_update={len(new_since_prev_update)}"
+            f"{progress_desc}: step={final_step}, date={prev_date}, "
+            f"unique_actions_total={len(seen_actions_total)}, "
+            f"unique_actions_new_in_day={len(new_actions_in_day)}"
         )
         action_stats_rows.append(
             {
                 "step": final_step,
-                "unique_actions_total": len(seen_actions),
-                "unique_actions_new_since_prev_update": len(new_since_prev_update),
+                "date": prev_date,
+                "unique_actions_total": len(seen_actions_total),
+                "unique_actions_new_in_day": len(new_actions_in_day),
             }
         )
         if pbar is not None:
@@ -712,6 +725,7 @@ def evaluate_policy(
             "avg_regret": final_avg_regret,
             "cumulative_ips_regret": cumulative_ips_regret,
             "avg_ips_regret": final_avg_ips_regret,
+            "train_unique_actions": len(initial_seen_actions or set()),
         }
     ])
     history_df = pd.DataFrame(history_rows)
@@ -742,6 +756,8 @@ def run_scenarios(
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
+            initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
+
             metrics_df, history_df, action_stats_df = evaluate_policy(
                 policy=policy,
                 test_df=test_df,
@@ -751,6 +767,7 @@ def run_scenarios(
                 progress_desc=f"{scenario.name}/{algo_name}",
                 ctr_by_action=ctr_by_action,
                 max_random_ctr=max_random_ctr,
+                initial_seen_actions=initial_seen_actions,
             )
             metrics_df["scenario"] = scenario.name
             metrics_df["algo"] = algo_name
