@@ -565,6 +565,8 @@ def evaluate_policy(
 
     pending_updates: list[tuple[int, float, list[float]]] = []
     next_progress_mark = progress_chunk
+    seen_actions: set[int] = set()
+    seen_actions_prev_checkpoint: set[int] = set()
 
     test_rows = list(test_df.iter_rows(named=True))
 
@@ -583,6 +585,7 @@ def evaluate_policy(
             candidates = candidates_batch[offset]
             features = features_batch[offset]
             action = int(actions_batch[offset])
+            seen_actions.add(action)
 
             logged_reward = float(row["reward"])
             logged_match = int(action == int(row["show"]))
@@ -637,6 +640,19 @@ def evaluate_policy(
             if pbar is not None and step >= next_progress_mark:
                 pbar.update(step - pbar.n)
                 next_progress_mark += progress_chunk
+
+            if step % update_chunk == 0:
+                new_since_prev_chunk = seen_actions - seen_actions_prev_checkpoint
+                msg = (
+                    f"{progress_desc}: step={step}, "
+                    f"unique_actions_total={len(seen_actions)}, "
+                    f"unique_actions_new_since_prev_chunk={len(new_since_prev_chunk)}"
+                )
+                if pbar is not None:
+                    pbar.write(msg)
+                else:
+                    print(msg)
+                seen_actions_prev_checkpoint = set(seen_actions)
 
     if pending_updates:
         policy.update_batch(pending_updates)
