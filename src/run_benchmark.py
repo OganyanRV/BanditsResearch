@@ -12,6 +12,7 @@ from bandit_benchmark import (
     CatBoostPolicy,
     EpsilonGreedyPolicy,
     LogisticTSLibPolicy,
+    LaplaceThompsonViaBayesianLogRegPolicy,
     RandomPolicy,
     PartitionedTSLibPolicy,
     ThompsonSamplingPolicy,
@@ -117,6 +118,12 @@ def main() -> None:
         "ucb": lambda: UCBPolicy(),
         "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),
     }
+
+    try:
+        import scipy  # noqa: F401
+        policy_factories["laplace_ts_logreg"] = lambda: LaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
+    except Exception:
+        print("scipy is unavailable: skipping LaplaceThompsonViaBayesianLogRegPolicy")
 
     try:
         import catboost  # noqa: F401

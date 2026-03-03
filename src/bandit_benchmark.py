@@ -152,6 +152,192 @@ class ThompsonSamplingPolicy(BasePolicy):
         self.beta[action] = self.beta.get(action, self.beta0) + (1.0 - reward)
 
 
+class OnlineLogisticRegression:
+    """Online Logistic Regression with diagonal precision q (Laplace-like)."""
+
+    def __init__(self, lambda_: float, alpha: float, n_dim: int, seed: int | None = None):
+        import numpy as np
+
+        self.lambda_ = float(lambda_)
+        self.alpha = float(alpha)
+        self.n_dim = int(n_dim)
+
+        self.m = np.zeros(self.n_dim, dtype=np.float64)
+        self.q = np.ones(self.n_dim, dtype=np.float64) * self.lambda_
+
+        self.rng = np.random.default_rng(seed)
+        self.w = self.get_weights()
+
+    def loss(self, w, X, y) -> float:
+        import numpy as np
+
+        prior = 0.5 * (self.q * (w - self.m)).dot(w - self.m)
+        z = y * (X @ w)
+        ll = np.logaddexp(0.0, -z).sum()
+        return float(prior + ll)
+
+    def grad(self, w, X, y):
+        import numpy as np
+
+        g = self.q * (w - self.m)
+        z = y * (X @ w)
+        coeff = -y / (1.0 + np.exp(z))
+        g += (coeff[:, None] * X).sum(axis=0)
+        return g
+
+    def get_weights(self):
+        import numpy as np
+
+        std = self.alpha / np.sqrt(np.maximum(self.q, 1e-12))
+        return self.rng.normal(loc=self.m, scale=std, size=self.n_dim)
+
+    def fit(self, X, y, maxiter: int = 20) -> None:
+        import numpy as np
+        from scipy.optimize import minimize
+        from scipy.special import expit
+
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.int64)
+        if X.ndim != 2 or X.shape[1] != self.n_dim:
+            raise ValueError(f"X must be (n,{self.n_dim}), got {X.shape}")
+        if y.ndim != 1 or y.shape[0] != X.shape[0]:
+            raise ValueError("y must be (n,) aligned with X")
+
+        res = minimize(
+            fun=self.loss,
+            x0=self.w,
+            args=(X, y),
+            jac=self.grad,
+            method="L-BFGS-B",
+            options={"maxiter": int(maxiter), "disp": False},
+        )
+        self.w = res.x.astype(np.float64, copy=False)
+        self.m = self.w.copy()
+
+        p = expit(X @ self.m)
+        v = p * (1.0 - p)
+        self.q = self.q + (v[:, None] * (X * X)).sum(axis=0)
+
+    def predict_proba(self, X, mode: str = "sample"):
+        import numpy as np
+        from scipy.special import expit
+
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+
+        if mode == "sample":
+            w = self.get_weights()
+        elif mode == "expected":
+            w = self.m
+        else:
+            raise ValueError("mode not recognized: use 'sample' or 'expected'")
+
+        p = expit(X @ w)
+        return np.vstack([1.0 - p, p]).T
+
+
+class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
+    """Per-action Bayesian online logistic TS with Laplace-style diagonal precision."""
+
+    can_update_online: bool = True
+
+    def __init__(
+        self,
+        lambda_: float = 1.0,
+        alpha: float = 1.0,
+        maxiter_update: int = 5,
+        maxiter_batch: int = 20,
+        seed: int | None = None,
+        can_update_online: bool | None = None,
+    ) -> None:
+        super().__init__(can_update_online=can_update_online)
+        self.lambda_ = float(lambda_)
+        self.alpha = float(alpha)
+        self.maxiter_update = int(maxiter_update)
+        self.maxiter_batch = int(maxiter_batch)
+        self.seed = seed
+
+        self._d: int | None = None
+        self._models: dict[int, OnlineLogisticRegression] = {}
+
+    def _get_model(self, a: int) -> OnlineLogisticRegression:
+        m = self._models.get(a)
+        if m is None:
+            if self._d is None:
+                raise ValueError("Feature dimension is unknown; call update/select with features first")
+            arm_seed = None if self.seed is None else (self.seed + 1000003 * a)
+            m = OnlineLogisticRegression(self.lambda_, self.alpha, self._d, seed=arm_seed)
+            self._models[a] = m
+        return m
+
+    def _ensure_dim(self, features: list[float]) -> int:
+        d = len(features)
+        if self._d is None:
+            self._d = d
+        elif self._d != d:
+            raise ValueError(f"Feature dimension changed: expected {self._d}, got {d}")
+        return d
+
+    def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
+        import numpy as np
+
+        if features is None:
+            return
+        self._ensure_dim(features)
+        a = int(action)
+        model = self._get_model(a)
+
+        x = np.asarray(features, dtype=np.float64).reshape(1, -1)
+        y = np.asarray([1 if float(reward) > 0 else -1], dtype=np.int64)
+        model.fit(x, y, maxiter=self.maxiter_update)
+
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        import numpy as np
+
+        if not pending_updates:
+            return
+
+        self._ensure_dim(pending_updates[0][2])
+        by_arm: dict[int, tuple[list, list[int]]] = {}
+        for a, r, f in pending_updates:
+            arm = int(a)
+            x = np.asarray(f, dtype=np.float64)
+            y = 1 if float(r) > 0 else -1
+            if arm not in by_arm:
+                by_arm[arm] = ([], [])
+            by_arm[arm][0].append(x)
+            by_arm[arm][1].append(y)
+
+        for arm, (X_list, y_list) in by_arm.items():
+            model = self._get_model(arm)
+            X = np.vstack(X_list)
+            y = np.asarray(y_list, dtype=np.int64)
+            model.fit(X, y, maxiter=self.maxiter_batch)
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        import numpy as np
+
+        del row
+        if not candidates:
+            raise ValueError("candidates is empty")
+        self._ensure_dim(features)
+
+        x = np.asarray(features, dtype=np.float64).reshape(1, -1)
+        best_a = int(candidates[0])
+        best_score = -np.inf
+
+        for a_raw in candidates:
+            a = int(a_raw)
+            model = self._get_model(a)
+            p = float(model.predict_proba(x, mode="sample")[0, 1])
+            if p > best_score:
+                best_score = p
+                best_a = a
+
+        return best_a
+
+
 class ContextualBanditPlaceholder(BasePolicy):
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
