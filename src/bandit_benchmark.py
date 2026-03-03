@@ -64,6 +64,15 @@ class BasePolicy:
         ]
         self.update_batch(pending_updates)
 
+    def predict_reward_proba(
+        self,
+        action: Action,
+        features: list[float],
+        row: dict[str, object],
+    ) -> float | None:
+        del action, features, row
+        return None
+
 
 class RandomPolicy(BasePolicy):
     can_update_online = False
@@ -103,6 +112,10 @@ class EpsilonGreedyPolicy(BasePolicy):
         self.values[action] = v + (reward - v) / n
         self.counts[action] = n
 
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        del features, row
+        return float(self.values.get(int(action), 0.0))
+
 
 class UCBPolicy(BasePolicy):
     def __init__(self, exploration: float = 2.0, can_update_online: bool | None = None):
@@ -130,6 +143,10 @@ class UCBPolicy(BasePolicy):
         self.values[action] = v + (reward - v) / n
         self.counts[action] = n
 
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        del features, row
+        return float(self.values.get(int(action), 0.0))
+
 
 class ThompsonSamplingPolicy(BasePolicy):
     def __init__(self, alpha: float = 1.0, beta: float = 1.0, seed: int = 42, can_update_online: bool | None = None):
@@ -150,6 +167,14 @@ class ThompsonSamplingPolicy(BasePolicy):
         del features
         self.alpha[action] = self.alpha.get(action, self.alpha0) + reward
         self.beta[action] = self.beta.get(action, self.beta0) + (1.0 - reward)
+
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        del features, row
+        a = int(action)
+        alpha = self.alpha.get(a, self.alpha0)
+        beta = self.beta.get(a, self.beta0)
+        denom = alpha + beta
+        return float(alpha / denom) if denom > 0 else 0.0
 
 
 class OnlineLogisticRegression:
@@ -177,11 +202,11 @@ class OnlineLogisticRegression:
         return float(prior + ll)
 
     def grad(self, w, X, y):
-        import numpy as np
+        from scipy.special import expit
 
         g = self.q * (w - self.m)
         z = y * (X @ w)
-        coeff = -y / (1.0 + np.exp(z))
+        coeff = -y * expit(-z)
         g += (coeff[:, None] * X).sum(axis=0)
         return g
 
@@ -205,7 +230,7 @@ class OnlineLogisticRegression:
 
         res = minimize(
             fun=self.loss,
-            x0=self.w,
+            x0=self.m,
             args=(X, y),
             jac=self.grad,
             method="L-BFGS-B",
@@ -248,6 +273,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         alpha: float = 1.0,
         maxiter_update: int = 5,
         maxiter_batch: int = 20,
+        maxiter_fit: int = 50,
         seed: int | None = None,
         can_update_online: bool | None = None,
     ) -> None:
@@ -256,6 +282,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self.alpha = float(alpha)
         self.maxiter_update = int(maxiter_update)
         self.maxiter_batch = int(maxiter_batch)
+        self.maxiter_fit = int(maxiter_fit)
         self.seed = seed
 
         self._d: int | None = None
@@ -314,6 +341,44 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             X = np.vstack(X_list)
             y = np.asarray(y_list, dtype=np.int64)
             model.fit(X, y, maxiter=self.maxiter_batch)
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        import numpy as np
+
+        pending_updates = [
+            (int(r["show"]), float(r["reward"]), list(r["features_list"]))
+            for r in train_df.iter_rows(named=True)
+        ]
+        if not pending_updates:
+            return
+
+        self._ensure_dim(pending_updates[0][2])
+        by_arm: dict[int, tuple[list, list[int]]] = {}
+        for a, r, f in pending_updates:
+            arm = int(a)
+            x = np.asarray(f, dtype=np.float64)
+            y = 1 if float(r) > 0 else -1
+            if arm not in by_arm:
+                by_arm[arm] = ([], [])
+            by_arm[arm][0].append(x)
+            by_arm[arm][1].append(y)
+
+        for arm, (X_list, y_list) in by_arm.items():
+            model = self._get_model(arm)
+            X = np.vstack(X_list)
+            y = np.asarray(y_list, dtype=np.int64)
+            model.fit(X, y, maxiter=self.maxiter_fit)
+
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        import numpy as np
+
+        del row
+        self._ensure_dim(features)
+        model = self._models.get(int(action))
+        if model is None:
+            return None
+        x = np.asarray(features, dtype=np.float64).reshape(1, -1)
+        return float(model.predict_proba(x, mode="expected")[0, 1])
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         import numpy as np
@@ -426,6 +491,18 @@ class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
         best_action = self._actions[ids[idx_max]]
         return int(best_action)
 
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        import numpy as np
+
+        del row
+        if self._model is None:
+            return None
+        idx = self._a2i.get(int(action))
+        if idx is None:
+            return None
+        probs = self._model.predict(np.array(features[:50]), output_all_scores=True)
+        return float(probs["scores"][0][idx])
+
     def select_batch(
         self,
         candidates_batch: list[list[Action]],
@@ -522,6 +599,18 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
         best_action = self._actions[ids[idx_max]]
 
         return int(best_action)
+
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        import numpy as np
+
+        del row
+        if self._model is None:
+            return None
+        idx = self._a2i.get(int(action))
+        if idx is None:
+            return None
+        probs = self._model.predict(np.array(features[:50]), output_all_scores=True)
+        return float(probs["scores"][0][idx])
 
     def select_batch(
         self,
@@ -654,6 +743,13 @@ class CatBoostPolicy(BasePolicy):
                 best_score = p
                 best_action = int(a)
         return best_action
+
+    def predict_reward_proba(self, action: Action, features: list[float], row: dict[str, object]) -> float | None:
+        del row
+        if self._model is None:
+            return None
+        vec = self._row_to_vector(features, int(action))
+        return float(self._model.predict_proba([vec])[0][1])
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
@@ -794,7 +890,7 @@ def evaluate_policy(
     ctr_by_action: dict[int, float] | None = None,
     max_random_ctr: float = 0.0,
     initial_seen_actions: set[int] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
     used = 0
@@ -803,6 +899,7 @@ def evaluate_policy(
     cumulative_ips_regret = 0.0  # IPS regret accumulator (used only for regret metrics)
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
+    selected_action_rows: list[dict[str, object]] = []
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -875,6 +972,16 @@ def evaluate_policy(
 
             action = int(actions_batch[offset])
             current_day_actions.add(action)
+
+            selected_proba = policy.predict_reward_proba(action, features, row)
+            selected_action_rows.append(
+                {
+                    "step": step,
+                    "date": current_date if current_date is not None else prev_date,
+                    "action": action,
+                    "selected_action_probability": float(selected_proba) if selected_proba is not None else float("nan"),
+                }
+            )
 
             logged_reward = float(row["reward"])
             logged_match = int(action == int(row["show"]))
@@ -977,7 +1084,29 @@ def evaluate_policy(
     ])
     history_df = pd.DataFrame(history_rows)
     action_stats_df = pd.DataFrame(action_stats_rows)
-    return metrics_df, history_df, action_stats_df
+
+    selected_df = pd.DataFrame(selected_action_rows)
+    if not selected_df.empty:
+        daily = selected_df.groupby(["date", "action"], as_index=False).agg(
+            impressions_selected=("action", "size"),
+            avg_selected_action_probability=("selected_action_probability", "mean"),
+        )
+        day_totals = daily.groupby("date", as_index=False)["impressions_selected"].sum().rename(columns={"impressions_selected": "day_total_impressions"})
+        action_daily_stats_df = daily.merge(day_totals, on="date", how="left")
+        action_daily_stats_df["show_share"] = action_daily_stats_df["impressions_selected"] / action_daily_stats_df["day_total_impressions"]
+    else:
+        action_daily_stats_df = pd.DataFrame(
+            columns=[
+                "date",
+                "action",
+                "impressions_selected",
+                "avg_selected_action_probability",
+                "day_total_impressions",
+                "show_share",
+            ]
+        )
+
+    return metrics_df, history_df, action_stats_df, action_daily_stats_df
 
 
 def run_scenarios(
@@ -991,9 +1120,12 @@ def run_scenarios(
     metrics_parts: list[pd.DataFrame] = []
     history_parts: list[pd.DataFrame] = []
     action_stats_parts: list[pd.DataFrame] = []
+    action_daily_stats_parts: list[pd.DataFrame] = []
+    trained_models: dict[str, dict[str, BasePolicy]] = {}
 
     for scenario in scenarios:
         pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
+        trained_models[scenario.name] = {}
         # Regret-only statistics are estimated from combined train+test logs.
         ctr_source = pl.concat([train_df.select(["policy", "show", "reward"]), test_df.select(["policy", "show", "reward"])], how="vertical")
         ctr_by_action, max_random_ctr = build_random_action_ctr_stats(ctr_source)
@@ -1005,7 +1137,7 @@ def run_scenarios(
 
             initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
-            metrics_df, history_df, action_stats_df = evaluate_policy(
+            metrics_df, history_df, action_stats_df, action_daily_stats_df = evaluate_policy(
                 policy=policy,
                 test_df=test_df,
                 online_update=scenario.online_update,
@@ -1019,6 +1151,7 @@ def run_scenarios(
             metrics_df["scenario"] = scenario.name
             metrics_df["algo"] = algo_name
             metrics_parts.append(metrics_df)
+            trained_models[scenario.name][algo_name] = policy
 
             if not history_df.empty:
                 history_df["scenario"] = scenario.name
@@ -1030,10 +1163,22 @@ def run_scenarios(
                 action_stats_df["algo"] = algo_name
                 action_stats_parts.append(action_stats_df)
 
+            if not action_daily_stats_df.empty:
+                action_daily_stats_df["scenario"] = scenario.name
+                action_daily_stats_df["algo"] = algo_name
+                action_daily_stats_parts.append(action_daily_stats_df)
+
     out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
     out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
     out_action_stats = pd.concat(action_stats_parts, ignore_index=True) if action_stats_parts else pd.DataFrame()
-    return {"metrics": out_metrics, "history": out_history, "action_stats": out_action_stats}
+    out_action_daily_stats = pd.concat(action_daily_stats_parts, ignore_index=True) if action_daily_stats_parts else pd.DataFrame()
+    return {
+        "metrics": out_metrics,
+        "history": out_history,
+        "action_stats": out_action_stats,
+        "action_daily_stats": out_action_daily_stats,
+        "trained_models": trained_models,
+    }
 
 
 def make_simulated_environment(

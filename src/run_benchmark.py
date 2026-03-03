@@ -157,23 +157,29 @@ def main() -> None:
     metrics_df = result["metrics"]
     history_df = result["history"]
     action_stats_df = result["action_stats"]
+    action_daily_stats_df = result["action_daily_stats"]
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.csv"
     history_path = out_dir / "history.csv"
     action_stats_path = out_dir / "action_stats.csv"
+    action_daily_stats_path = out_dir / "action_daily_stats.csv"
     metrics_df.to_csv(metrics_path, index=False)
     history_df.to_csv(history_path, index=False)
     action_stats_df.to_csv(action_stats_path, index=False)
+    action_daily_stats_df.to_csv(action_daily_stats_path, index=False)
 
     print(f"saved metrics: {metrics_path}")
     print(f"saved history: {history_path}")
     print(f"saved action stats: {action_stats_path}")
+    print(f"saved action daily stats: {action_daily_stats_path}")
     print(metrics_df)
     if args.simulate:
         print("action stats (date-change checkpoints):")
         print(action_stats_df)
+        print("action daily stats (distribution/probability by day):")
+        print(action_daily_stats_df)
 
     plot_paths = save_plots(history_df, str(out_dir / "plots"))
     if plot_paths:
