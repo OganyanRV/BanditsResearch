@@ -178,7 +178,7 @@ def main() -> None:
     if args.simulate:
         print("action stats (date-change checkpoints):")
         print(action_stats_df)
-        print("action daily stats (distribution/probability by day):")
+        print("action daily stats (new actions selected per day):")
         print(action_daily_stats_df)
 
     plot_paths = save_plots(history_df, str(out_dir / "plots"))
