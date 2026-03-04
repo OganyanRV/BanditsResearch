@@ -832,6 +832,7 @@ def evaluate_policy(
     cumulative_ips_regret = 0.0  # IPS regret accumulator (used only for regret metrics)
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
+    selected_action_rows: list[dict[str, object]] = []
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -904,6 +905,14 @@ def evaluate_policy(
 
             action = int(actions_batch[offset])
             current_day_actions.add(action)
+
+            selected_action_rows.append(
+                {
+                    "step": step,
+                    "date": current_date if current_date is not None else prev_date,
+                    "action": action,
+                }
+            )
 
             logged_reward = float(row["reward"])
             logged_match = int(action == int(row["show"]))
@@ -1001,16 +1010,18 @@ def evaluate_policy(
             "avg_regret": final_avg_regret,
             "cumulative_ips_regret": cumulative_ips_regret,
             "avg_ips_regret": final_avg_ips_regret,
-            "train_unique_actions": len(initial_seen_actions or set()),
         }
     ])
     history_df = pd.DataFrame(history_rows)
     action_stats_df = pd.DataFrame(action_stats_rows)
 
-    if not action_stats_df.empty:
-        action_daily_stats_df = action_stats_df[["date", "unique_actions_new_in_day"]].copy()
+    selected_df = pd.DataFrame(selected_action_rows)
+    if not selected_df.empty:
+        action_daily_stats_df = selected_df.groupby(["date", "action"], as_index=False).agg(
+            impressions_selected=("action", "size")
+        )
     else:
-        action_daily_stats_df = pd.DataFrame(columns=["date", "unique_actions_new_in_day"])
+        action_daily_stats_df = pd.DataFrame(columns=["date", "action", "impressions_selected"])
 
     return metrics_df, history_df, action_stats_df, action_daily_stats_df
 
