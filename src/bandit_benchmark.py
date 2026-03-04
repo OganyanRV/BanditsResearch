@@ -882,11 +882,6 @@ def evaluate_policy(
 
                 new_actions_in_day = current_day_actions - seen_actions_total
                 seen_actions_total.update(current_day_actions)
-                msg = (
-                    f"{progress_desc}: step={step}, date={prev_date}, "
-                    f"unique_actions_total={len(seen_actions_total)}, "
-                    f"unique_actions_new_in_day={len(new_actions_in_day)}"
-                )
                 action_stats_rows.append(
                     {
                         "step": step,
@@ -895,10 +890,6 @@ def evaluate_policy(
                         "unique_actions_new_in_day": len(new_actions_in_day),
                     }
                 )
-                if pbar is not None:
-                    pbar.write(msg)
-                else:
-                    print(msg)
                 current_day_actions.clear()
 
             prev_date = current_date if current_date is not None else prev_date
@@ -970,11 +961,6 @@ def evaluate_policy(
         new_actions_in_day = current_day_actions - seen_actions_total
         seen_actions_total.update(current_day_actions)
         final_step = test_df.height
-        msg = (
-            f"{progress_desc}: step={final_step}, date={prev_date}, "
-            f"unique_actions_total={len(seen_actions_total)}, "
-            f"unique_actions_new_in_day={len(new_actions_in_day)}"
-        )
         action_stats_rows.append(
             {
                 "step": final_step,
@@ -983,10 +969,6 @@ def evaluate_policy(
                 "unique_actions_new_in_day": len(new_actions_in_day),
             }
         )
-        if pbar is not None:
-            pbar.write(msg)
-        else:
-            print(msg)
 
     if pbar is not None:
         pbar.update(test_df.height - pbar.n)
