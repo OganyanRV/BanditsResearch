@@ -758,6 +758,24 @@ def apply_standard_scaler_to_features(df: pl.DataFrame) -> pl.DataFrame:
         return df.with_columns(pl.Series("features_list", feat_rows))
     except Exception:
         return df
+
+
+def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.DataFrame) -> pl.DataFrame:
+    """Keep test rows whose candidate list is fully covered by train actions.
+
+    A row is preserved only if every action in `candidates_list` exists in train `show` actions.
+    """
+    train_actions = {int(r["show"]) for r in train_df.iter_rows(named=True)}
+    if not train_actions:
+        return test_df.clear()
+
+    keep_mask: list[bool] = []
+    for row in test_df.iter_rows(named=True):
+        candidates = row.get("candidates_list") or []
+        keep_mask.append(all(int(a) in train_actions for a in candidates))
+
+    return test_df.filter(pl.Series("_keep", keep_mask))
+
 def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
     if not 0.0 < test_ratio < 1.0:
         raise ValueError("test_ratio must be in (0,1)")
