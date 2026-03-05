@@ -21,7 +21,12 @@ from pathlib import Path
 
 import polars as pl
 
-from bandit_benchmark import apply_standard_scaler_to_features, preprocess_bandit_dataframe, split_train_test_by_date
+from bandit_benchmark import (
+    apply_standard_scaler_to_features,
+    filter_test_by_train_candidate_coverage,
+    preprocess_bandit_dataframe,
+    split_train_test_by_date,
+)
 
 
 def load_source(path: str) -> pl.DataFrame:
@@ -50,20 +55,64 @@ def stage1_make_splits(input_path: str, out_dir: str, test_ratio: float, seed: i
     return train_stage1, test_stage1
 
 
+def _save_variant(train_df: pl.DataFrame, test_df: pl.DataFrame, out: Path, variant_name: str) -> tuple[Path, Path]:
+    train_path = out / f"train_{variant_name}.parquet"
+    test_path = out / f"test_{variant_name}.parquet"
+    train_df.write_parquet(train_path)
+    test_df.write_parquet(test_path)
+    return train_path, test_path
+
+
 def stage2_scale_features(train_stage1: Path, test_stage1: Path, out_dir: str) -> tuple[Path, Path]:
+    """Build all requested preprocessing variants.
+
+    Returns default prepared pair equivalent to variant_2 (scaled features).
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    train_df = pl.read_parquet(train_stage1)
-    test_df = pl.read_parquet(test_stage1)
+    train_base = pl.read_parquet(train_stage1)
+    test_base = pl.read_parquet(test_stage1)
 
-    train_df = apply_standard_scaler_to_features(train_df)
-    test_df = apply_standard_scaler_to_features(test_df)
+    # 2) train/test with standardized features
+    train_scaled = apply_standard_scaler_to_features(train_base)
+    test_scaled = apply_standard_scaler_to_features(test_base)
 
+    # 3) scaled + test rows with no unseen actions vs train
+    test_scaled_known = filter_test_by_train_candidate_coverage(train_scaled, test_scaled)
+
+    # 4) scaled + train rows where num_candidates > 1
+    train_scaled_multi = train_scaled.filter(pl.col("candidates_list").list.len() > 1)
+
+    # 5) train/test without scaling
+    train_raw = train_base
+    test_raw = test_base
+
+    # 6) raw + test rows with no unseen actions vs train
+    test_raw_known = filter_test_by_train_candidate_coverage(train_raw, test_raw)
+
+    # 7) raw + train rows where num_candidates > 1
+    train_raw_multi = train_raw.filter(pl.col("candidates_list").list.len() > 1)
+
+    variants = {
+        # 1) test random-only filtering is already applied in stage1; keep explicit artifact
+        "variant_1_random_test_only": (train_raw, test_raw),
+        "variant_2_scaled": (train_scaled, test_scaled),
+        "variant_3_scaled_test_known_actions": (train_scaled, test_scaled_known),
+        "variant_4_scaled_train_num_candidates_gt1": (train_scaled_multi, test_scaled),
+        "variant_5_raw": (train_raw, test_raw),
+        "variant_6_raw_test_known_actions": (train_raw, test_raw_known),
+        "variant_7_raw_train_num_candidates_gt1": (train_raw_multi, test_raw),
+    }
+
+    for name, (tr, te) in variants.items():
+        _save_variant(tr, te, out, name)
+
+    # Backward-compatible default artifacts = variant 2
     train_final = out / "train_prepared.parquet"
     test_final = out / "test_prepared.parquet"
-    train_df.write_parquet(train_final)
-    test_df.write_parquet(test_final)
+    train_scaled.write_parquet(train_final)
+    test_scaled.write_parquet(test_final)
     return train_final, test_final
 
 
@@ -80,8 +129,9 @@ def main() -> None:
     print(f"stage1 test:  {test_s1}")
 
     train_final, test_final = stage2_scale_features(train_s1, test_s1, args.out_dir)
-    print(f"prepared train: {train_final}")
-    print(f"prepared test:  {test_final}")
+    print(f"prepared train (default variant_2_scaled): {train_final}")
+    print(f"prepared test  (default variant_2_scaled): {test_final}")
+    print("additional stage2 variants were also saved under out-dir")
 
 
 if __name__ == "__main__":
