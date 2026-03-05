@@ -13,6 +13,7 @@ from bandit_benchmark import (
     EpsilonGreedyPolicy,
     LogisticTSLibPolicy,
     LaplaceThompsonViaBayesianLogRegPolicy,
+    NeuralLaplaceThompsonViaBayesianLogRegPolicy,
     RandomPolicy,
     PartitionedTSLibPolicy,
     ThompsonSamplingPolicy,
@@ -122,6 +123,11 @@ def main() -> None:
     try:
         import scipy  # noqa: F401
         policy_factories["laplace_ts_logreg"] = lambda: LaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
+        try:
+            import torch  # noqa: F401
+            policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
+        except Exception:
+            print("torch is unavailable: skipping NeuralLaplaceThompsonViaBayesianLogRegPolicy")
     except Exception:
         print("scipy is unavailable: skipping LaplaceThompsonViaBayesianLogRegPolicy")
 

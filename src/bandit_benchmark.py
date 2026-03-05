@@ -367,6 +367,195 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         return best_a
 
 
+
+
+class _NeuralActionRewardEncoder:
+    """Simple MLP encoder + action logits head trained with BCE on logged action."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_actions: int,
+        hidden_dims: list[int],
+        rep_dim: int,
+        lr: float,
+        seed: int | None,
+    ):
+        import torch
+        import torch.nn as nn
+
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        dims = [input_dim] + hidden_dims
+        trunk_layers: list[nn.Module] = []
+        for i in range(len(dims) - 1):
+            trunk_layers.append(nn.Linear(dims[i], dims[i + 1]))
+            trunk_layers.append(nn.ReLU())
+
+        if hidden_dims:
+            trunk_out = hidden_dims[-1]
+        else:
+            trunk_out = input_dim
+
+        self.trunk = nn.Sequential(*trunk_layers)
+        self.rep_layer = nn.Linear(trunk_out, rep_dim)
+        self.head = nn.Linear(rep_dim, num_actions)
+
+        self.optimizer = torch.optim.RMSprop(
+            list(self.trunk.parameters()) + list(self.rep_layer.parameters()) + list(self.head.parameters()),
+            lr=lr,
+        )
+        self.loss_fn = nn.BCEWithLogitsLoss()
+
+    def train_encoder(self, X, action_idx, reward, epochs: int, batch_size: int) -> None:
+        import torch
+
+        X_t = torch.as_tensor(X, dtype=torch.float32)
+        a_t = torch.as_tensor(action_idx, dtype=torch.long)
+        r_t = torch.as_tensor(reward, dtype=torch.float32)
+        n = X_t.shape[0]
+        if n == 0:
+            return
+
+        for _ in range(max(1, int(epochs))):
+            perm = torch.randperm(n)
+            for st in range(0, n, max(1, int(batch_size))):
+                idx = perm[st : st + max(1, int(batch_size))]
+                xb = X_t[idx]
+                ab = a_t[idx]
+                rb = r_t[idx]
+
+                z = self.trunk(xb)
+                rep = self.rep_layer(z)
+                logits = self.head(rep)
+                chosen_logits = logits.gather(1, ab.view(-1, 1)).squeeze(1)
+                loss = self.loss_fn(chosen_logits, rb)
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+    def transform(self, X):
+        import torch
+
+        with torch.no_grad():
+            x = torch.as_tensor(X, dtype=torch.float32)
+            z = self.trunk(x)
+            rep = self.rep_layer(z)
+        return rep.cpu().numpy()
+
+
+class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
+    """Laplace TS over neural representations; NN trains only in fit()."""
+
+    can_update_online: bool = True
+
+    def __init__(
+        self,
+        lambda_: float = 1.0,
+        alpha: float = 1.0,
+        maxiter_update: int = 5,
+        maxiter_batch: int = 20,
+        maxiter_fit: int = 50,
+        hidden_dims: list[int] | None = None,
+        rep_dim: int = 32,
+        nn_lr: float = 1e-3,
+        nn_epochs: int = 10,
+        nn_batch_size: int = 256,
+        seed: int | None = None,
+        can_update_online: bool | None = None,
+    ) -> None:
+        super().__init__(can_update_online=can_update_online)
+        self.hidden_dims = hidden_dims or [64, 32]
+        self.rep_dim = int(rep_dim)
+        self.nn_lr = float(nn_lr)
+        self.nn_epochs = int(nn_epochs)
+        self.nn_batch_size = int(nn_batch_size)
+        self.seed = seed
+
+        self._encoder: _NeuralActionRewardEncoder | None = None
+        self._encoder_trained = False
+        self._action_to_idx: dict[int, int] = {}
+
+        self._base = LaplaceThompsonViaBayesianLogRegPolicy(
+            lambda_=lambda_,
+            alpha=alpha,
+            maxiter_update=maxiter_update,
+            maxiter_batch=maxiter_batch,
+            maxiter_fit=maxiter_fit,
+            seed=seed,
+            can_update_online=can_update_online,
+        )
+
+    def _transform_features(self, features: list[float]) -> list[float]:
+        import numpy as np
+
+        if not self._encoder_trained or self._encoder is None:
+            return list(features)
+        arr = np.asarray(features, dtype=np.float32).reshape(1, -1)
+        rep = self._encoder.transform(arr)[0]
+        return [float(v) for v in rep.tolist()]
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        import numpy as np
+
+        rows = list(train_df.iter_rows(named=True))
+        if not rows:
+            return
+
+        X = np.asarray([list(r["features_list"]) for r in rows], dtype=np.float32)
+        actions = sorted({int(r["show"]) for r in rows})
+        self._action_to_idx = {a: i for i, a in enumerate(actions)}
+        a_idx = np.asarray([self._action_to_idx[int(r["show"])] for r in rows], dtype=np.int64)
+        y = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in rows], dtype=np.float32)
+
+        self._encoder = _NeuralActionRewardEncoder(
+            input_dim=X.shape[1],
+            num_actions=len(actions),
+            hidden_dims=self.hidden_dims,
+            rep_dim=self.rep_dim,
+            lr=self.nn_lr,
+            seed=self.seed,
+        )
+        self._encoder.train_encoder(X, a_idx, y, epochs=self.nn_epochs, batch_size=self.nn_batch_size)
+        self._encoder_trained = True
+
+        Z = self._encoder.transform(X)
+        transformed_updates = [
+            (int(r["show"]), float(r["reward"]), [float(v) for v in Z[i].tolist()])
+            for i, r in enumerate(rows)
+        ]
+
+        by_arm: dict[int, tuple[list, list[int]]] = {}
+        for a, rew, feat in transformed_updates:
+            arm = int(a)
+            x = np.asarray(feat, dtype=np.float64)
+            yy = 1 if float(rew) > 0 else -1
+            if arm not in by_arm:
+                by_arm[arm] = ([], [])
+            by_arm[arm][0].append(x)
+            by_arm[arm][1].append(yy)
+
+        self._base._ensure_dim(transformed_updates[0][2])
+        for arm, (X_list, y_list) in by_arm.items():
+            model = self._base._get_model(arm)
+            X_arm = np.vstack(X_list)
+            y_arm = np.asarray(y_list, dtype=np.int64)
+            model.fit(X_arm, y_arm, maxiter=self._base.maxiter_fit)
+
+    def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
+        if features is None:
+            return
+        self._base.update(action, reward, self._transform_features(features))
+
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        transformed = [(a, r, self._transform_features(f)) for a, r, f in pending_updates]
+        self._base.update_batch(transformed)
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        return self._base.select(candidates, self._transform_features(features), row)
+
 class ContextualBanditPlaceholder(BasePolicy):
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         del candidates, features, row
