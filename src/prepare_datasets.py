@@ -21,12 +21,101 @@ from pathlib import Path
 
 import polars as pl
 
-from bandit_benchmark import (
-    apply_standard_scaler_to_features,
-    filter_test_by_train_candidate_coverage,
-    preprocess_bandit_dataframe,
-    split_train_test_by_date,
-)
+NULL_FEATURE_FILL = 0.0
+
+
+def _parse_candidates(raw: str) -> list[int]:
+    if raw is None or raw == "":
+        return []
+    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
+
+
+def _parse_features(raw: str) -> list[float]:
+    if raw is None or raw == "":
+        return []
+
+    vals: list[float] = []
+    for x in str(raw).split("\\t"):
+        token = str(x).strip().lower()
+        if token == "":
+            continue
+        if token in {"null", "none", "nan"}:
+            vals.append(NULL_FEATURE_FILL)
+        else:
+            vals.append(float(token))
+    return vals
+
+
+def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    req = {"policy", "reward", "features", "show", "candidates", "date"}
+    missing = req - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    prepared = df.with_columns(
+        [
+            pl.col("show").cast(pl.Int64),
+            pl.col("reward"),
+            pl.col("date").str.to_datetime(strict=False),
+            pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
+            pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
+        ]
+    )
+
+    return prepared.with_columns(
+        (pl.lit(1.0) / pl.col("candidates_list").list.len().cast(pl.Float64)).alias("propensity")
+    )
+
+
+def apply_standard_scaler_to_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Scale `features_list` with StandardScaler when sklearn is available."""
+    try:
+        import numpy as np
+        from sklearn.preprocessing import StandardScaler
+
+        feat_rows = df.select("features_list").to_series().to_list()
+        non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
+        if not non_empty_idx:
+            return df
+
+        dim = len(feat_rows[non_empty_idx[0]])
+        valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
+        if not valid_idx:
+            return df
+
+        X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+        for j, i in enumerate(valid_idx):
+            feat_rows[i] = [float(v) for v in Xs[j].tolist()]
+        return df.with_columns(pl.Series("features_list", feat_rows))
+    except Exception:
+        return df
+
+
+def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.DataFrame) -> pl.DataFrame:
+    """Keep test rows whose candidate list is fully covered by train actions.
+
+    A row is preserved only if every action in `candidates_list` exists in train `show` actions.
+    """
+    train_actions = {int(r["show"]) for r in train_df.iter_rows(named=True)}
+    if not train_actions:
+        return test_df.clear()
+
+    keep_mask: list[bool] = []
+    for row in test_df.iter_rows(named=True):
+        candidates = row.get("candidates_list") or []
+        keep_mask.append(all(int(a) in train_actions for a in candidates))
+
+    return test_df.filter(pl.Series("_keep", keep_mask))
+
+
+def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
+    if not 0.0 < test_ratio < 1.0:
+        raise ValueError("test_ratio must be in (0,1)")
+    ordered = df.sort("date")
+    split_idx = int(ordered.height * (1.0 - test_ratio))
+    return ordered.slice(0, split_idx), ordered.slice(split_idx, ordered.height - split_idx)
 
 
 def load_source(path: str) -> pl.DataFrame:
