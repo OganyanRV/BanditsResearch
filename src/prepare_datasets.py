@@ -8,30 +8,18 @@ import polars as pl
 NULL_FEATURE_FILL = 0.0
 
 
-def _split_escaped_or_tab_separated(raw: object) -> list[str]:
-    """Split strings that may be encoded with literal ``\t`` or real tab characters."""
-    if raw is None:
+def _parse_candidates(raw: str) -> list[int]:
+    if raw is None or raw == "":
         return []
-    if isinstance(raw, list):
-        return [str(x) for x in raw]
+    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
 
-    text = str(raw)
-    if text == "":
+
+def _parse_features(raw: str) -> list[float]:
+    if raw is None or raw == "":
         return []
 
-    # Some datasets store separators as literal "\t", others as real tab chars.
-    text = text.replace("\\t", "\t")
-    return text.split("\t")
-
-
-def _parse_candidates(raw: object) -> list[int]:
-    tokens = _split_escaped_or_tab_separated(raw)
-    return [int(token) for token in tokens if str(token).strip() != ""]
-
-
-def _parse_features(raw: object) -> list[float]:
     vals: list[float] = []
-    for x in _split_escaped_or_tab_separated(raw):
+    for x in str(raw).split("\\t"):
         token = str(x).strip().lower()
         if token == "":
             continue
