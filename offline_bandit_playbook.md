@@ -49,6 +49,11 @@
 Раннер всегда считает две ветки метрик одновременно:
 - replay-метрики (`reward`, `avg_reward`, `ctr`)
 - IPS-метрики (`ips_reward`, `ips_avg_reward`, `ips_ctr`)
+- IPS-метрики для «чувствительного» подмножества запросов, где в строке
+  больше одного доступного действия (`len(candidates) > 1`):
+  - `sensitive_impressions`
+  - `ips_ctr_sensitive`
+  - `ips_regret_sens`
 
 IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 В replay-ветке шаг без совпадения действия и показа не добавляется в history.
@@ -92,6 +97,10 @@ IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
 2. На втором шаге скрипт применяет `StandardScaler` к `features_list` и сохраняет финальные:
    - `artifacts/datasets/train_prepared.parquet`
    - `artifacts/datasets/test_prepared.parquet`
+
+Также `prepare_datasets.py` сохраняет дополнительные parquet-варианты.
+Текущий набор: `variant_1`, `variant_2`, `variant_3`, `variant_5`, `variant_6`.
+Варианты с фильтром test по `num_candidates > 1` больше не формируются.
 
 Дальше для обычного запуска `run_benchmark.py` сначала пытается загрузить подготовленные split'ы с диска
 (`--train-path`, `--test-path`), и только если их нет — строит их из `--input`.

@@ -1033,6 +1033,9 @@ def evaluate_policy(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
+    ips_sensitive_reward_sum = 0.0
+    ips_sensitive_regret_sum = 0.0
+    sensitive_rows = 0
     used = 0
     replay_matches = 0
     cumulative_regret = 0.0  # replay regret accumulator (used only for regret metrics)
@@ -1124,6 +1127,11 @@ def evaluate_policy(
             ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
             cumulative_ips_regret += ips_step_regret
 
+            if len(candidates) > 1:
+                sensitive_rows += 1
+                ips_sensitive_reward_sum += ips_reward
+                ips_sensitive_regret_sum += ips_step_regret
+
             if env_reward is None:
                 if not logged_match:
                     if pbar is not None and step >= next_progress_mark:
@@ -1186,6 +1194,8 @@ def evaluate_policy(
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
     final_avg_regret = (cumulative_regret / used) if used else 0.0
     final_avg_ips_regret = (cumulative_ips_regret / test_df.height) if test_df.height else 0.0
+    ips_ctr_sensitive = (ips_sensitive_reward_sum / sensitive_rows) if sensitive_rows else 0.0
+    ips_regret_sens = (ips_sensitive_regret_sum / sensitive_rows) if sensitive_rows else 0.0
     metrics_df = pd.DataFrame([
         {
             "impressions_total": test_df.height,
@@ -1199,6 +1209,9 @@ def evaluate_policy(
             "avg_regret": final_avg_regret,
             "cumulative_ips_regret": cumulative_ips_regret,
             "avg_ips_regret": final_avg_ips_regret,
+            "sensitive_impressions": sensitive_rows,
+            "ips_ctr_sensitive": ips_ctr_sensitive,
+            "ips_regret_sens": ips_regret_sens,
         }
     ])
     history_df = pd.DataFrame(history_rows)

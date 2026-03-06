@@ -81,28 +81,20 @@ def stage2_scale_features(train_stage1: Path, test_stage1: Path, out_dir: str) -
     # 3) scaled + test rows with no unseen actions vs train
     test_scaled_known = filter_test_by_train_candidate_coverage(train_scaled, test_scaled)
 
-    # 4) scaled + test rows where num_candidates > 1
-    test_scaled_multi = test_scaled.filter(pl.col("candidates_list").list.len() > 1)
-
-    # 5) train/test without scaling
+    # 4) train/test without scaling
     train_raw = train_base
     test_raw = test_base
 
-    # 6) raw + test rows with no unseen actions vs train
+    # 5) raw + test rows with no unseen actions vs train
     test_raw_known = filter_test_by_train_candidate_coverage(train_raw, test_raw)
-
-    # 7) raw + test rows where num_candidates > 1
-    test_raw_multi = test_raw.filter(pl.col("candidates_list").list.len() > 1)
 
     variants = {
         # 1) test random-only filtering is already applied in stage1; keep explicit artifact
         "variant_1_random_test_only": (train_raw, test_raw),
         "variant_2_scaled": (train_scaled, test_scaled),
         "variant_3_scaled_test_known_actions": (train_scaled, test_scaled_known),
-        "variant_4_scaled_test_num_candidates_gt1": (train_scaled, test_scaled_multi),
         "variant_5_raw": (train_raw, test_raw),
         "variant_6_raw_test_known_actions": (train_raw, test_raw_known),
-        "variant_7_raw_test_num_candidates_gt1": (train_raw, test_raw_multi),
     }
 
     for name, (tr, te) in variants.items():
