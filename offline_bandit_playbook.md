@@ -1,0 +1,106 @@
+# Bandit experiment plan (polars + pandas metrics + tqdm)
+
+## Формат входных данных
+Ожидается таблица (TSV/Parquet) с колонками:
+- `policy`
+- `reward`
+- `features` — строка чисел, разделённых `"\\t"` (возможны `null`)
+- `show`
+- `candidates` — строка id, разделённых `"\\t"`
+- `date`
+
+Парсинг делает `preprocess_bandit_dataframe(...)`:
+- `candidates -> candidates_list: list[int]`
+- `features -> features_list: list[float]`
+- `features_list` дополнительно нормализуется через `StandardScaler()` (если доступен sklearn)
+- `null/none/nan` в features заменяется на `0.0`
+- `propensity = 1 / num_candidates`
+
+## Ключевые изменения
+- Политики: `epsilon_greedy`, `ucb`, `thompson_sampling`, `catboost` (если установлен пакет `catboost`), `logistic_ts` и `partitioned_ts` (если установлен пакет `contextualbandits`).
+- `CatBoostPolicy` обучается один раз и не дообучается онлайн.
+`LogisticTSPolicy` и `PartitionedTSPolicy` обучаются через `update_batch(...)` на накопленных апдейтах pretrain.
+- Обработка данных на polars, а `metrics` и `history` возвращаются как pandas DataFrame.
+- Статистика в политиках обновляется батчами: каждые ~10% шагов теста.
+- `tqdm` обновляется не на каждом шаге, а каждые ~5% шагов.
+- Убрана онлайн-отрисовка графиков во время rollout (callback удалён).
+
+## Сэмплирование и фильтрация теста
+После split:
+- `train_df.sample(fraction=1.0, shuffle=True).sort("date")`
+- `test_df.sample(fraction=1.0, shuffle=True).sort("date")`
+- далее тест ограничивается `policy == random`.
+
+## Регрет
+Регрет считается на каждом шаге по доступным действиям:
+- один раз считаем `CTR(action)` на объединённых train+test данных, где `policy == random`
+- на шаге берём максимум только по доступным действиям `candidates`: `max_available_ctr_t = max_{a in candidates_t} CTR(a), fallback = max_random_ctr`
+- далее `regret_t = max_available_ctr_t - reward_t_fact`.
+
+Где `reward_t_fact`:
+- для replay — фактический наблюдаемый reward (только на матчах replay),
+- для IPS-трека — фактический reward, если был матч, иначе 0.
+
+## Сценарии
+- `core_scenarios()` — дефолтный минимальный сценарий: `case_2_random_pretrain_online_update`.
+- `default_five_scenarios()` — полный набор из 5 сценариев.
+
+## IPS-статистики (считаются одновременно)
+Раннер всегда считает две ветки метрик одновременно:
+- replay-метрики (`reward`, `avg_reward`, `ctr`)
+- IPS-метрики (`ips_reward`, `ips_avg_reward`, `ips_ctr`)
+- IPS-метрики для «чувствительного» подмножества запросов, где в строке
+  больше одного доступного действия (`len(candidates) > 1`):
+  - `sensitive_impressions`
+  - `ips_ctr_sensitive`
+  - `ips_regret_sens`
+
+IPS-награда: `ips_reward_t = I[a_t == show_t] * reward_t / propensity_t`.
+В replay-ветке шаг без совпадения действия и показа не добавляется в history.
+
+## Возвращаемые результаты
+`run_scenarios(...)` возвращает dict:
+1. `metrics` — pandas DataFrame (по `(scenario, algo)`)
+2. `history` — pandas DataFrame по шагам (`avg_reward`, `cumulative_regret`, `avg_regret`)
+
+## CLI запуск
+Скрипт: `src/run_benchmark.py`
+
+Примеры:
+- `python src/run_benchmark.py --input data/events.tsv --test-ratio 0.2`
+- `python src/run_benchmark.py --input data/events.tsv`  # по умолчанию core
+- `python src/run_benchmark.py --input data/events.tsv --full-scenarios`
+- `python src/run_benchmark.py --input data/events.tsv --simulate --stochastic-sim`
+
+Артефакты:
+- `artifacts/metrics.csv`
+- `artifacts/history.csv`
+- `artifacts/plots/*.png` (если доступен matplotlib)
+
+## Ноутбук для запуска
+`notebooks/run_benchmark_demo.ipynb` повторяет flow из `run_benchmark.py`.
+
+
+При построении графиков используется downsampling:
+- `stride = max(1, int(round(max_step * 0.05)))`
+- `ds = algo_df.iloc[stride::stride]`
+
+Для графиков regret используется log-scale по оси Y.
+
+
+## Рекомендуемый двухшаговый пайплайн данных
+1. `python src/prepare_datasets.py --input data/events.tsv --out-dir artifacts/datasets --test-ratio 0.5`
+   - читает сырой tsv/parquet в polars
+   - делит на train/test
+   - фильтрует test по `policy == random`
+   - сохраняет `train_stage1.parquet` и `test_stage1.parquet`
+2. На втором шаге скрипт применяет `StandardScaler` к `features_list` и сохраняет финальные:
+   - `artifacts/datasets/train_prepared.parquet`
+   - `artifacts/datasets/test_prepared.parquet`
+
+Также `prepare_datasets.py` сохраняет дополнительные parquet-варианты.
+Текущий набор: `variant_1`, `variant_2`, `variant_3`, `variant_5`, `variant_6`.
+Варианты с фильтром test по `num_candidates > 1` больше не формируются.
+
+Дальше для обычного запуска `run_benchmark.py` сначала пытается загрузить подготовленные split'ы с диска
+(`--train-path`, `--test-path`), и только если их нет — строит их из `--input`.
