@@ -30,6 +30,7 @@ class ScenarioConfig:
     name: str
     pretrain_source: Literal["random", "all", "none"]
     online_update: bool
+    update_frequency: Literal["daily", "step_2p5"] = "daily"
 
 
 class BasePolicy:
@@ -465,6 +466,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         maxiter_batch: int = 20,
         maxiter_fit: int = 50,
         hidden_dims: list[int] | None = None,
+        network_architecture: list[int] | None = None,
         rep_dim: int = 32,
         nn_lr: float = 1e-3,
         nn_epochs: int = 10,
@@ -473,7 +475,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         can_update_online: bool | None = None,
     ) -> None:
         super().__init__(can_update_online=can_update_online)
-        self.hidden_dims = hidden_dims or [64, 32]
+        self.hidden_dims = network_architecture or hidden_dims or [64, 32]
         self.rep_dim = int(rep_dim)
         self.nn_lr = float(nn_lr)
         self.nn_epochs = int(nn_epochs)
@@ -935,6 +937,7 @@ def evaluate_policy(
     policy: BasePolicy,
     test_df: pl.DataFrame,
     online_update: bool,
+    update_frequency: Literal["daily", "step_2p5"] = "daily",
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
@@ -967,6 +970,12 @@ def evaluate_policy(
 
     pending_updates: list[tuple[int, float, list[float]]] = []
     next_progress_mark = progress_chunk
+    update_chunk = max(1, int(total_steps * 0.025))
+    next_step_update_mark = update_chunk
+
+    sensitive_seen = 0
+    sensitive_ips_reward_cum = 0.0
+    sensitive_ips_regret_cum = 0.0
     seen_actions_total: set[int] = set(initial_seen_actions or set())
     current_day_actions: set[int] = set()
 
@@ -997,7 +1006,7 @@ def evaluate_policy(
             features = features_batch[offset]
             current_date = row.get("date")
             if prev_date is not None and current_date is not None and current_date > prev_date:
-                if online_update and policy.can_update_online and pending_updates:
+                if update_frequency == "daily" and online_update and policy.can_update_online and pending_updates:
                     policy.update_batch(pending_updates)
                     pending_updates.clear()
 
@@ -1042,6 +1051,9 @@ def evaluate_policy(
                 sensitive_rows += 1
                 ips_sensitive_reward_sum += ips_reward
                 ips_sensitive_regret_sum += ips_step_regret
+                sensitive_seen += 1
+                sensitive_ips_reward_cum += ips_reward
+                sensitive_ips_regret_cum += ips_step_regret
 
             if env_reward is None:
                 if not logged_match:
@@ -1063,6 +1075,11 @@ def evaluate_policy(
 
             if online_update and policy.can_update_online:
                 pending_updates.append((action, reward, features))
+                if update_frequency == "step_2p5" and step >= next_step_update_mark and pending_updates:
+                    policy.update_batch(pending_updates)
+                    pending_updates.clear()
+                    while next_step_update_mark <= step:
+                        next_step_update_mark += update_chunk
 
             history_rows.append(
                 {
@@ -1075,6 +1092,9 @@ def evaluate_policy(
                     "avg_regret": cumulative_regret / used,
                     "cumulative_ips_regret": cumulative_ips_regret,
                     "avg_ips_regret": cumulative_ips_regret / step,
+                    "sensitive_impressions_so_far": sensitive_seen,
+                    "ips_ctr_sensitive_so_far": (sensitive_ips_reward_cum / sensitive_seen) if sensitive_seen else 0.0,
+                    "avg_ips_regret_sens_so_far": (sensitive_ips_regret_cum / sensitive_seen) if sensitive_seen else 0.0,
                 }
             )
 
@@ -1099,6 +1119,10 @@ def evaluate_policy(
     if pbar is not None:
         pbar.update(test_df.height - pbar.n)
         pbar.close()
+
+    if online_update and policy.can_update_online and pending_updates:
+        policy.update_batch(pending_updates)
+        pending_updates.clear()
 
     ctr = total_reward / used if used else 0.0
     ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
@@ -1171,6 +1195,7 @@ def run_scenarios(
                 policy=policy,
                 test_df=test_df,
                 online_update=scenario.online_update,
+                update_frequency=scenario.update_frequency,
                 env_reward=env_reward,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
@@ -1230,12 +1255,18 @@ def make_simulated_environment(
 def default_five_scenarios() -> list[ScenarioConfig]:
     return [
         ScenarioConfig("case_1_random_pretrain_predict_only", "random", False),
-        ScenarioConfig("case_2_random_pretrain_online_update", "random", True),
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+        ScenarioConfig("case_2b_random_pretrain_online_update_step_2p5", "random", True, "step_2p5"),
         ScenarioConfig("case_3_all_pretrain_predict_only", "all", False),
-        ScenarioConfig("case_4_all_pretrain_online_update", "all", True),
-        ScenarioConfig("case_5_no_pretrain_online_update", "none", True),
+        ScenarioConfig("case_4_all_pretrain_online_update_daily", "all", True, "daily"),
+        ScenarioConfig("case_4b_all_pretrain_online_update_step_2p5", "all", True, "step_2p5"),
+        ScenarioConfig("case_5_no_pretrain_online_update_daily", "none", True, "daily"),
+        ScenarioConfig("case_5b_no_pretrain_online_update_step_2p5", "none", True, "step_2p5"),
     ]
 
 
 def core_scenarios() -> list[ScenarioConfig]:
-    return [ScenarioConfig("case_2_random_pretrain_online_update", "random", True)]
+    return [
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+        ScenarioConfig("case_2b_random_pretrain_online_update_step_2p5", "random", True, "step_2p5"),
+    ]

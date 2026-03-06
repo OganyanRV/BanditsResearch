@@ -87,7 +87,7 @@ def main() -> None:
     parser.add_argument("--input", help="Path to source dataset (tsv/parquet)")
     parser.add_argument("--train-path", default="artifacts/datasets/train_prepared.parquet", help="Prepared train parquet")
     parser.add_argument("--test-path", default="artifacts/datasets/test_prepared.parquet", help="Prepared test parquet")
-    parser.add_argument("--test-ratio", type=float, default=0.5)
+    parser.add_argument("--train-days", type=int, default=1, help="How many first unique dates go to train")
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
@@ -95,6 +95,7 @@ def main() -> None:
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--full-scenarios", action="store_true", help="Run full five scenarios instead of core")
+    parser.add_argument("--neural-hidden-dims", default="64,32", help="Comma-separated hidden layer sizes for neural_laplace_ts_logreg")
     args = parser.parse_args()
 
     train_path = Path(args.train_path)
@@ -107,7 +108,7 @@ def main() -> None:
             raise ValueError("Either provide --input or prepare datasets at --train-path/--test-path")
         raw_df = load_dataset(args.input)
         df = preprocess_bandit_dataframe(raw_df)
-        train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
+        train_df, test_df = split_train_test_by_date(df, train_days=args.train_days)
         train_df = train_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
         test_df = test_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
         test_df = test_df.filter(pl.col("policy") == "random")
@@ -124,7 +125,11 @@ def main() -> None:
         policy_factories["laplace_ts_logreg"] = lambda: LaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
         try:
             import torch  # noqa: F401
-            policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
+            hidden_dims = [int(x.strip()) for x in args.neural_hidden_dims.split(",") if x.strip()]
+            policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(
+                seed=args.seed,
+                network_architecture=hidden_dims,
+            )
         except Exception:
             print("torch is unavailable: skipping NeuralLaplaceThompsonViaBayesianLogRegPolicy")
     except Exception:

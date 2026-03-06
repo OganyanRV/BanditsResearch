@@ -129,12 +129,22 @@ def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.
     return test_df.filter(pl.Series("_keep", keep_mask))
 
 
-def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
-    if not 0.0 < test_ratio < 1.0:
-        raise ValueError("test_ratio must be in (0,1)")
+def split_train_test_by_date(df: pl.DataFrame, train_days: int) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Split by date: first `train_days` unique dates go to train, rest to test."""
+    if train_days <= 0:
+        raise ValueError("train_days must be > 0")
+
     ordered = df.sort("date")
-    split_idx = int(ordered.height * (1.0 - test_ratio))
-    return ordered.slice(0, split_idx), ordered.slice(split_idx, ordered.height - split_idx)
+    unique_dates = ordered.select(pl.col("date").unique().sort()).to_series().to_list()
+    if not unique_dates:
+        return ordered.clear(), ordered.clear()
+
+    cutoff_idx = min(int(train_days), len(unique_dates))
+    train_date_set = set(unique_dates[:cutoff_idx])
+
+    train_df = ordered.filter(pl.col("date").is_in(train_date_set))
+    test_df = ordered.filter(~pl.col("date").is_in(train_date_set))
+    return train_df, test_df
 
 
 def load_source(path: str) -> pl.DataFrame:
@@ -144,13 +154,13 @@ def load_source(path: str) -> pl.DataFrame:
     return pl.read_csv(path, separator="\t", schema_overrides={"candidates": pl.String})
 
 
-def stage1_make_splits(input_path: str, out_dir: str, test_ratio: float, seed: int) -> tuple[Path, Path]:
+def stage1_make_splits(input_path: str, out_dir: str, train_days: int, seed: int) -> tuple[Path, Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     raw_df = load_source(input_path)
     df = preprocess_bandit_dataframe(raw_df)
-    train_df, test_df = split_train_test_by_date(df, test_ratio=test_ratio)
+    train_df, test_df = split_train_test_by_date(df, train_days=train_days)
 
     train_df = train_df.sample(fraction=1.0, shuffle=True, seed=seed).sort("date")
     test_df = test_df.sample(fraction=1.0, shuffle=True, seed=seed).sort("date")
@@ -217,11 +227,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare train/test datasets in two stages")
     parser.add_argument("--input", required=True, help="Path to source tsv/parquet")
     parser.add_argument("--out-dir", default="artifacts/datasets")
-    parser.add_argument("--test-ratio", type=float, default=0.5)
+    parser.add_argument("--train-days", type=int, default=1, help="How many first unique dates go to train")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    train_s1, test_s1 = stage1_make_splits(args.input, args.out_dir, args.test_ratio, args.seed)
+    train_s1, test_s1 = stage1_make_splits(args.input, args.out_dir, args.train_days, args.seed)
     print(f"stage1 train: {train_s1}")
     print(f"stage1 test:  {test_s1}")
 
