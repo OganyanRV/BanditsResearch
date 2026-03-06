@@ -1,19 +1,3 @@
-"""Two-stage dataset preparation pipeline.
-
-Stage 1:
-- read source TSV/Parquet
-- preprocess columns into candidates/features lists + propensity
-- split train/test
-- shuffle+sort each split
-- filter test to policy == random
-- save interim splits to disk
-
-Stage 2:
-- load interim splits
-- apply StandardScaler to features_list
-- overwrite/save final prepared train/test files
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,7 +11,7 @@ NULL_FEATURE_FILL = 0.0
 def _parse_candidates(raw: str) -> list[int]:
     if raw is None or raw == "":
         return []
-    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
+    return [int(x) for x in str(raw).split("\t") if str(x) != ""]
 
 
 def _parse_features(raw: str) -> list[float]:
@@ -35,7 +19,7 @@ def _parse_features(raw: str) -> list[float]:
         return []
 
     vals: list[float] = []
-    for x in str(raw).split("\\t"):
+    for x in str(raw).split("\t"):
         token = str(x).strip().lower()
         if token == "":
             continue
@@ -67,30 +51,65 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def apply_standard_scaler_to_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Scale `features_list` with StandardScaler when sklearn is available."""
+def _transform_features_with_scaler(df: pl.DataFrame, scaler) -> pl.DataFrame:
+    import numpy as np
+
+    feat_rows = df.select("features_list").to_series().to_list()
+    non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
+    if not non_empty_idx:
+        return df
+
+    dim = len(feat_rows[non_empty_idx[0]])
+    valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
+    if not valid_idx:
+        return df
+
+    X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
+    Xs = scaler.transform(X)
+    for j, i in enumerate(valid_idx):
+        feat_rows[i] = [float(v) for v in Xs[j].tolist()]
+    return df.with_columns(pl.Series("features_list", feat_rows))
+
+
+def apply_standard_scaler_to_features(
+    train_df: pl.DataFrame,
+    test_df: pl.DataFrame,
+    fit_fraction: float = 1.0,
+    seed: int = 42,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Fit scaler on train features and transform both train and test.
+
+    If sklearn is unavailable or compatible features cannot be extracted, returns inputs unchanged.
+    """
     try:
         import numpy as np
         from sklearn.preprocessing import StandardScaler
 
-        feat_rows = df.select("features_list").to_series().to_list()
-        non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
+        train_feat_rows = train_df.select("features_list").to_series().to_list()
+        non_empty_idx = [i for i, row in enumerate(train_feat_rows) if isinstance(row, list) and len(row) > 0]
         if not non_empty_idx:
-            return df
+            return train_df, test_df
 
-        dim = len(feat_rows[non_empty_idx[0]])
-        valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
+        dim = len(train_feat_rows[non_empty_idx[0]])
+        valid_idx = [i for i in non_empty_idx if len(train_feat_rows[i]) == dim]
         if not valid_idx:
-            return df
+            return train_df, test_df
 
-        X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
+        fit_idx = valid_idx
+        if 0.0 < fit_fraction < 1.0:
+            rng = np.random.default_rng(seed)
+            k = max(1, int(round(len(valid_idx) * fit_fraction)))
+            fit_idx = sorted(rng.choice(valid_idx, size=k, replace=False).tolist())
+
+        X_fit = np.array([train_feat_rows[i] for i in fit_idx], dtype=float)
         scaler = StandardScaler()
-        Xs = scaler.fit_transform(X)
-        for j, i in enumerate(valid_idx):
-            feat_rows[i] = [float(v) for v in Xs[j].tolist()]
-        return df.with_columns(pl.Series("features_list", feat_rows))
+        scaler.fit(X_fit)
+
+        train_scaled = _transform_features_with_scaler(train_df, scaler)
+        test_scaled = _transform_features_with_scaler(test_df, scaler)
+        return train_scaled, test_scaled
     except Exception:
-        return df
+        return train_df, test_df
 
 
 def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.DataFrame) -> pl.DataFrame:
@@ -155,7 +174,7 @@ def _save_variant(train_df: pl.DataFrame, test_df: pl.DataFrame, out: Path, vari
 def stage2_scale_features(train_stage1: Path, test_stage1: Path, out_dir: str) -> tuple[Path, Path]:
     """Build all requested preprocessing variants.
 
-    Returns default prepared pair equivalent to variant_2 (scaled features).
+    Returns default prepared pair equivalent to variant_1_scaled.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -163,33 +182,30 @@ def stage2_scale_features(train_stage1: Path, test_stage1: Path, out_dir: str) -
     train_base = pl.read_parquet(train_stage1)
     test_base = pl.read_parquet(test_stage1)
 
-    # 2) train/test with standardized features
-    train_scaled = apply_standard_scaler_to_features(train_base)
-    test_scaled = apply_standard_scaler_to_features(test_base)
+    # 1) train/test with standardized features using scaler fit on train
+    train_scaled, test_scaled = apply_standard_scaler_to_features(train_base, test_base)
 
-    # 3) scaled + test rows with no unseen actions vs train
+    # 2) scaled + test rows with no unseen actions vs train
     test_scaled_known = filter_test_by_train_candidate_coverage(train_scaled, test_scaled)
 
-    # 4) train/test without scaling
+    # 3) train/test without scaling
     train_raw = train_base
     test_raw = test_base
 
-    # 5) raw + test rows with no unseen actions vs train
+    # 4) raw + test rows with no unseen actions vs train
     test_raw_known = filter_test_by_train_candidate_coverage(train_raw, test_raw)
 
     variants = {
-        # 1) test random-only filtering is already applied in stage1; keep explicit artifact
-        "variant_1_random_test_only": (train_raw, test_raw),
-        "variant_2_scaled": (train_scaled, test_scaled),
-        "variant_3_scaled_test_known_actions": (train_scaled, test_scaled_known),
-        "variant_5_raw": (train_raw, test_raw),
-        "variant_6_raw_test_known_actions": (train_raw, test_raw_known),
+        "variant_1_scaled": (train_scaled, test_scaled),
+        "variant_2_scaled_test_known_actions": (train_scaled, test_scaled_known),
+        "variant_3_raw": (train_raw, test_raw),
+        "variant_4_raw_test_known_actions": (train_raw, test_raw_known),
     }
 
     for name, (tr, te) in variants.items():
         _save_variant(tr, te, out, name)
 
-    # Backward-compatible default artifacts = variant 2
+    # Backward-compatible default artifacts = variant 1
     train_final = out / "train_prepared.parquet"
     test_final = out / "test_prepared.parquet"
     train_scaled.write_parquet(train_final)
@@ -210,8 +226,8 @@ def main() -> None:
     print(f"stage1 test:  {test_s1}")
 
     train_final, test_final = stage2_scale_features(train_s1, test_s1, args.out_dir)
-    print(f"prepared train (default variant_2_scaled): {train_final}")
-    print(f"prepared test  (default variant_2_scaled): {test_final}")
+    print(f"prepared train (default variant_1_scaled): {train_final}")
+    print(f"prepared test  (default variant_1_scaled): {test_final}")
     print("additional stage2 variants were also saved under out-dir")
 
 
