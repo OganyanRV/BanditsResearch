@@ -181,6 +181,12 @@ def main() -> None:
     print(f"saved action stats: {action_stats_path}")
     print(f"saved action daily stats: {action_daily_stats_path}")
     print(metrics_df)
+
+    sensitive_cols = ["scenario", "algo", "sensitive_impressions", "ips_ctr_sensitive", "ips_regret_sens"]
+    if set(sensitive_cols).issubset(metrics_df.columns):
+        print("sensitive IPS metrics (rows with len(candidates) > 1):")
+        print(metrics_df[sensitive_cols].sort_values(["scenario", "algo"]).to_string(index=False))
+
     if args.simulate:
         print("action stats (date-change checkpoints):")
         print(action_stats_df)
