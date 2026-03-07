@@ -467,6 +467,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         maxiter_fit: int = 50,
         hidden_dims: list[int] | None = None,
         network_architecture: list[int] | None = None,
+        encoder: _NeuralActionRewardEncoder | None = None,
         rep_dim: int = 32,
         nn_lr: float = 1e-3,
         nn_epochs: int = 10,
@@ -478,6 +479,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self.hidden_dims = network_architecture or hidden_dims or [64, 32]
         self.rep_dim = int(rep_dim)
         self.nn_lr = float(nn_lr)
+        self._provided_encoder = encoder
         self.nn_epochs = int(nn_epochs)
         self.nn_batch_size = int(nn_batch_size)
         self.seed = seed
@@ -518,14 +520,17 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         a_idx = np.asarray([self._action_to_idx[int(r["show"])] for r in rows], dtype=np.int64)
         y = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in rows], dtype=np.float32)
 
-        self._encoder = _NeuralActionRewardEncoder(
-            input_dim=X.shape[1],
-            num_actions=len(actions),
-            hidden_dims=self.hidden_dims,
-            rep_dim=self.rep_dim,
-            lr=self.nn_lr,
-            seed=self.seed,
-        )
+        if self._provided_encoder is not None:
+            self._encoder = self._provided_encoder
+        else:
+            self._encoder = _NeuralActionRewardEncoder(
+                input_dim=X.shape[1],
+                num_actions=len(actions),
+                hidden_dims=self.hidden_dims,
+                rep_dim=self.rep_dim,
+                lr=self.nn_lr,
+                seed=self.seed,
+            )
         self._encoder.train_encoder(X, a_idx, y, epochs=self.nn_epochs, batch_size=self.nn_batch_size)
         self._encoder_trained = True
 
