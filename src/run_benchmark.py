@@ -18,6 +18,7 @@ from bandit_benchmark import (
     RandomPolicy,
     PartitionedTSLibPolicy,
     ThompsonSamplingPolicy,
+    TreeThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
     core_scenarios,
@@ -119,6 +120,12 @@ def main() -> None:
         "ucb": lambda: UCBPolicy(),
         "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),
     }
+
+    try:
+        import sklearn  # noqa: F401
+        policy_factories["tree_thompson_sampling"] = lambda: TreeThompsonSamplingPolicy(random_state=args.seed)
+    except Exception:
+        print("sklearn is unavailable: skipping TreeThompsonSamplingPolicy")
 
     try:
         import scipy  # noqa: F401
