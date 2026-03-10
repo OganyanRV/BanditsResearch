@@ -28,8 +28,7 @@ def _parse_features(raw: str) -> list[float]:
         else:
             vals.append(float(token))
 
-    # Business rule: first two source features are ignored in prepared dataset.
-    return vals[2:] if len(vals) > 2 else []
+    return vals
 
 
 def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
