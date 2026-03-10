@@ -97,6 +97,7 @@ def main() -> None:
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--full-scenarios", action="store_true", help="Run full five scenarios instead of core")
     parser.add_argument("--neural-hidden-dims", default="64,32", help="Comma-separated hidden layer sizes for neural_laplace_ts_logreg")
+    parser.add_argument("--encoder-train-data-mode", choices=["all", "random_half", "time_half"], default="all")
     args = parser.parse_args()
 
     train_path = Path(args.train_path)
@@ -136,6 +137,7 @@ def main() -> None:
             policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(
                 seed=args.seed,
                 network_architecture=hidden_dims,
+                encoder_train_data_mode=args.encoder_train_data_mode,
             )
         except Exception:
             print("torch is unavailable: skipping NeuralLaplaceThompsonViaBayesianLogRegPolicy")

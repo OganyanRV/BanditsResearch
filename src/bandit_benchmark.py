@@ -687,7 +687,17 @@ class _NeuralActionRewardEncoder:
         )
         self.loss_fn = nn.BCEWithLogitsLoss()
 
-    def train_encoder(self, X, action_idx, reward, epochs: int, batch_size: int) -> None:
+    def train_encoder(
+        self,
+        X,
+        action_idx,
+        reward,
+        epochs: int,
+        batch_size: int,
+        val_fraction: float = 0.2,
+        early_stopping_patience: int = 5,
+        min_delta: float = 1e-4,
+    ) -> None:
         import torch
 
         X_t = torch.as_tensor(X, dtype=torch.float32)
@@ -697,9 +707,25 @@ class _NeuralActionRewardEncoder:
         if n == 0:
             return
 
+        all_idx = torch.randperm(n)
+        val_size = 0
+        if n > 1 and val_fraction > 0:
+            val_size = max(1, min(n - 1, int(round(n * float(val_fraction)))))
+
+        val_idx = all_idx[:val_size]
+        train_idx = all_idx[val_size:] if val_size > 0 else all_idx
+        if train_idx.numel() == 0:
+            train_idx = all_idx
+            val_idx = all_idx[:0]
+            val_size = 0
+
+        best_val_loss = float("inf")
+        best_state: dict[str, dict[str, torch.Tensor]] | None = None
+        patience_left = max(1, int(early_stopping_patience))
+
         for _ in range(max(1, int(epochs))):
-            perm = torch.randperm(n)
-            for st in range(0, n, max(1, int(batch_size))):
+            perm = train_idx[torch.randperm(train_idx.numel())]
+            for st in range(0, perm.numel(), max(1, int(batch_size))):
                 idx = perm[st : st + max(1, int(batch_size))]
                 xb = X_t[idx]
                 ab = a_t[idx]
@@ -714,6 +740,35 @@ class _NeuralActionRewardEncoder:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+
+            if val_size > 0:
+                with torch.no_grad():
+                    vb = X_t[val_idx]
+                    vab = a_t[val_idx]
+                    vrb = r_t[val_idx]
+                    vz = self.trunk(vb)
+                    vrep = self.rep_layer(vz)
+                    vlogits = self.head(vrep)
+                    vchosen = vlogits.gather(1, vab.view(-1, 1)).squeeze(1)
+                    val_loss = float(self.loss_fn(vchosen, vrb).item())
+
+                if val_loss < (best_val_loss - float(min_delta)):
+                    best_val_loss = val_loss
+                    best_state = {
+                        "trunk": {k: v.detach().cpu().clone() for k, v in self.trunk.state_dict().items()},
+                        "rep_layer": {k: v.detach().cpu().clone() for k, v in self.rep_layer.state_dict().items()},
+                        "head": {k: v.detach().cpu().clone() for k, v in self.head.state_dict().items()},
+                    }
+                    patience_left = max(1, int(early_stopping_patience))
+                else:
+                    patience_left -= 1
+                    if patience_left <= 0:
+                        break
+
+        if best_state is not None:
+            self.trunk.load_state_dict(best_state["trunk"])
+            self.rep_layer.load_state_dict(best_state["rep_layer"])
+            self.head.load_state_dict(best_state["head"])
 
     def transform(self, X):
         import torch
@@ -744,6 +799,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         nn_lr: float = 1e-3,
         nn_epochs: int = 10,
         nn_batch_size: int = 256,
+        encoder_train_data_mode: Literal["all", "random_half", "time_half"] = "all",
         seed: int | None = None,
         can_update_online: bool | None = None,
     ) -> None:
@@ -754,6 +810,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self._provided_encoder = encoder
         self.nn_epochs = int(nn_epochs)
         self.nn_batch_size = int(nn_batch_size)
+        self.encoder_train_data_mode = encoder_train_data_mode
         self.seed = seed
 
         self._encoder: _NeuralActionRewardEncoder | None = None
@@ -786,30 +843,60 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if not rows:
             return
 
-        X = np.asarray([list(r["features_list"]) for r in rows], dtype=np.float32)
         actions = sorted({int(r["show"]) for r in rows})
         self._action_to_idx = {a: i for i, a in enumerate(actions)}
-        a_idx = np.asarray([self._action_to_idx[int(r["show"])] for r in rows], dtype=np.int64)
-        y = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in rows], dtype=np.float32)
+
+        mode = self.encoder_train_data_mode
+        if mode not in {"all", "random_half", "time_half"}:
+            raise ValueError(f"Unknown encoder_train_data_mode: {mode}")
+
+        encoder_rows = rows
+        reg_rows = rows
+        n_rows = len(rows)
+
+        if mode == "random_half" and n_rows > 1:
+            rng = np.random.default_rng(self.seed)
+            perm = rng.permutation(n_rows)
+            split = max(1, n_rows // 2)
+            enc_idx = perm[:split]
+            reg_idx = perm[split:]
+            encoder_rows = [rows[int(i)] for i in enc_idx.tolist()]
+            reg_rows = [rows[int(i)] for i in reg_idx.tolist()] if len(reg_idx) > 0 else encoder_rows
+        elif mode == "time_half" and n_rows > 1:
+            ordered_rows = sorted(rows, key=lambda r: r.get("date"))
+            split = max(1, n_rows // 2)
+            encoder_rows = ordered_rows[:split]
+            reg_rows = ordered_rows[split:] if split < n_rows else encoder_rows
+
+        X_enc = np.asarray([list(r["features_list"]) for r in encoder_rows], dtype=np.float32)
+        a_idx_enc = np.asarray([self._action_to_idx[int(r["show"])] for r in encoder_rows], dtype=np.int64)
+        y_enc = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in encoder_rows], dtype=np.float32)
 
         if self._provided_encoder is not None:
             self._encoder = self._provided_encoder
         else:
             self._encoder = _NeuralActionRewardEncoder(
-                input_dim=X.shape[1],
+                input_dim=X_enc.shape[1],
                 num_actions=len(actions),
                 hidden_dims=self.hidden_dims,
                 rep_dim=self.rep_dim,
                 lr=self.nn_lr,
                 seed=self.seed,
             )
-        self._encoder.train_encoder(X, a_idx, y, epochs=self.nn_epochs, batch_size=self.nn_batch_size)
+        self._encoder.train_encoder(
+            X_enc,
+            a_idx_enc,
+            y_enc,
+            epochs=self.nn_epochs,
+            batch_size=self.nn_batch_size,
+        )
         self._encoder_trained = True
 
-        Z = self._encoder.transform(X)
+        X_reg = np.asarray([list(r["features_list"]) for r in reg_rows], dtype=np.float32)
+        Z_reg = self._encoder.transform(X_reg)
         transformed_updates = [
-            (int(r["show"]), float(r["reward"]), [float(v) for v in Z[i].tolist()])
-            for i, r in enumerate(rows)
+            (int(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
+            for i, r in enumerate(reg_rows)
         ]
 
         by_arm: dict[int, tuple[list, list[int]]] = {}
