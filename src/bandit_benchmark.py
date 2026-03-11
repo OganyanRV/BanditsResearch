@@ -793,7 +793,6 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         maxiter_batch: int = 20,
         maxiter_fit: int = 50,
         hidden_dims: list[int] | None = None,
-        network_architecture: list[int] | None = None,
         encoder: _NeuralActionRewardEncoder | None = None,
         rep_dim: int = 32,
         nn_lr: float = 1e-3,
@@ -804,7 +803,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         can_update_online: bool | None = None,
     ) -> None:
         super().__init__(can_update_online=can_update_online)
-        self.hidden_dims = network_architecture or hidden_dims or [64, 32]
+        self.hidden_dims = hidden_dims or [64, 32]
         self.rep_dim = int(rep_dim)
         self.nn_lr = float(nn_lr)
         self._provided_encoder = encoder
@@ -1308,7 +1307,7 @@ def evaluate_policy(
     ctr_by_action: dict[int, float] | None = None,
     max_random_ctr: float = 0.0,
     initial_seen_actions: set[int] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
     ips_sensitive_reward_sum = 0.0
@@ -1321,6 +1320,7 @@ def evaluate_policy(
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
     selected_action_rows: list[dict[str, object]] = []
+    action_sensitive_stats: dict[int, dict[str, float | int | bool]] = {}
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -1418,6 +1418,18 @@ def evaluate_policy(
                 sensitive_seen += 1
                 sensitive_ips_reward_cum += ips_reward
                 sensitive_ips_regret_cum += ips_step_regret
+
+                action_stat = action_sensitive_stats.setdefault(
+                    action,
+                    {
+                        "action": action,
+                        "in_train": bool(action in (initial_seen_actions or set())),
+                        "sensitive_impressions": 0,
+                        "cumulative_sensitive_ips_reward": 0.0,
+                    },
+                )
+                action_stat["sensitive_impressions"] = int(action_stat["sensitive_impressions"]) + 1
+                action_stat["cumulative_sensitive_ips_reward"] = float(action_stat["cumulative_sensitive_ips_reward"]) + float(ips_reward)
 
             if env_reward is None:
                 if not logged_match:
@@ -1524,7 +1536,17 @@ def evaluate_policy(
     else:
         action_daily_stats_df = pd.DataFrame(columns=["date", "action", "impressions_selected"])
 
-    return metrics_df, history_df, action_stats_df, action_daily_stats_df
+    if action_sensitive_stats:
+        action_sensitive_df = pd.DataFrame(list(action_sensitive_stats.values()))
+        action_sensitive_df["sensitive_ips_ctr"] = action_sensitive_df.apply(
+            lambda r: (float(r["cumulative_sensitive_ips_reward"]) / int(r["sensitive_impressions"])) if int(r["sensitive_impressions"]) > 0 else 0.0,
+            axis=1,
+        )
+        action_sensitive_df = action_sensitive_df.sort_values("sensitive_ips_ctr", ascending=False).reset_index(drop=True)
+    else:
+        action_sensitive_df = pd.DataFrame(columns=["action", "in_train", "sensitive_impressions", "cumulative_sensitive_ips_reward", "sensitive_ips_ctr"])
+
+    return metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df
 
 
 def run_scenarios(
@@ -1539,6 +1561,7 @@ def run_scenarios(
     history_parts: list[pd.DataFrame] = []
     action_stats_parts: list[pd.DataFrame] = []
     action_daily_stats_parts: list[pd.DataFrame] = []
+    action_sensitive_parts: list[pd.DataFrame] = []
     trained_models: dict[str, dict[str, BasePolicy]] = {}
 
     for scenario in scenarios:
@@ -1555,7 +1578,7 @@ def run_scenarios(
 
             initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
-            metrics_df, history_df, action_stats_df, action_daily_stats_df = evaluate_policy(
+            metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df = evaluate_policy(
                 policy=policy,
                 test_df=test_df,
                 online_update=scenario.online_update,
@@ -1587,15 +1610,22 @@ def run_scenarios(
                 action_daily_stats_df["algo"] = algo_name
                 action_daily_stats_parts.append(action_daily_stats_df)
 
+            if not action_sensitive_df.empty:
+                action_sensitive_df["scenario"] = scenario.name
+                action_sensitive_df["algo"] = algo_name
+                action_sensitive_parts.append(action_sensitive_df)
+
     out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
     out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
     out_action_stats = pd.concat(action_stats_parts, ignore_index=True) if action_stats_parts else pd.DataFrame()
     out_action_daily_stats = pd.concat(action_daily_stats_parts, ignore_index=True) if action_daily_stats_parts else pd.DataFrame()
+    out_action_sensitive_stats = pd.concat(action_sensitive_parts, ignore_index=True) if action_sensitive_parts else pd.DataFrame()
     return {
         "metrics": out_metrics,
         "history": out_history,
         "action_stats": out_action_stats,
         "action_daily_stats": out_action_daily_stats,
+        "action_sensitive_stats": out_action_sensitive_stats,
         "trained_models": trained_models,
     }
 
