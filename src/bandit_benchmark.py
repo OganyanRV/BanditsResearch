@@ -406,7 +406,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         c_min: int = 5,
         random_state: int = 42,
         refit_when_update: bool = False,
-        can_update_online: bool | None = None,
+        can_update_online: bool | None = True,
     ):
         super().__init__(can_update_online=can_update_online)
         self.max_depth = int(max_depth)
