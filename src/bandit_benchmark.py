@@ -1659,8 +1659,19 @@ def default_five_scenarios() -> list[ScenarioConfig]:
     ]
 
 
-def core_scenarios() -> list[ScenarioConfig]:
+def default_scenario() -> list[ScenarioConfig]:
+    return [
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+    ]
+
+
+def two_ways_default_scenario() -> list[ScenarioConfig]:
     return [
         ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
         ScenarioConfig("case_2b_random_pretrain_online_update_step_2p5", "random", True, "step_2p5"),
     ]
+
+
+def core_scenarios() -> list[ScenarioConfig]:
+    """Backward-compatible alias for previous default (two ways)."""
+    return two_ways_default_scenario()

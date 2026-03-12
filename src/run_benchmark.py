@@ -21,7 +21,7 @@ from bandit_benchmark import (
     TreeThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
-    core_scenarios,
+    default_scenario,
     default_five_scenarios,
     make_simulated_environment,
     run_scenarios,
@@ -124,7 +124,7 @@ def main() -> None:
 
     try:
         import sklearn  # noqa: F401
-        policy_factories["tree_thompson_sampling"] = lambda: TreeThompsonSamplingPolicy(random_state=args.seed)
+        policy_factories["tree_thompson_sampling_refit"] = lambda: TreeThompsonSamplingPolicy(random_state=args.seed, refit_when_update=True)
     except Exception:
         print("sklearn is unavailable: skipping TreeThompsonSamplingPolicy")
 
@@ -162,7 +162,7 @@ def main() -> None:
         expected_fn = build_expected_reward_estimator(train_df)
         env_reward = make_simulated_environment(proba_predictor=expected_fn, stochastic=args.stochastic_sim, seed=args.seed)
 
-    scenarios = default_five_scenarios() if args.full_scenarios else core_scenarios()
+    scenarios = default_five_scenarios() if args.full_scenarios else default_scenario()
 
     result = run_scenarios(
         train_df=train_df,
