@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
+from prepare_datasets import preprocess_bandit_dataframe, split_train_test_by_date
 from bandit_benchmark import (
     CatBoostPolicy,
     EpsilonGreedyPolicy,
@@ -17,14 +18,13 @@ from bandit_benchmark import (
     RandomPolicy,
     PartitionedTSLibPolicy,
     ThompsonSamplingPolicy,
+    TreeThompsonSamplingPolicy,
     UCBPolicy,
     build_expected_reward_estimator,
-    core_scenarios,
+    default_scenario,
     default_five_scenarios,
     make_simulated_environment,
-    preprocess_bandit_dataframe,
     run_scenarios,
-    split_train_test_by_date,
 )
 
 
@@ -88,7 +88,7 @@ def main() -> None:
     parser.add_argument("--input", help="Path to source dataset (tsv/parquet)")
     parser.add_argument("--train-path", default="artifacts/datasets/train_prepared.parquet", help="Prepared train parquet")
     parser.add_argument("--test-path", default="artifacts/datasets/test_prepared.parquet", help="Prepared test parquet")
-    parser.add_argument("--test-ratio", type=float, default=0.5)
+    parser.add_argument("--train-days", type=int, default=1, help="How many first unique dates go to train")
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--simulate", action="store_true", help="Use learned environment simulation")
@@ -96,6 +96,8 @@ def main() -> None:
     parser.add_argument("--output-dir", default="artifacts")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
     parser.add_argument("--full-scenarios", action="store_true", help="Run full five scenarios instead of core")
+    parser.add_argument("--neural-hidden-dims", default="64,32", help="Comma-separated hidden layer sizes for neural_laplace_ts_logreg")
+    parser.add_argument("--encoder-train-data-mode", choices=["all", "random_half", "time_half"], default="all")
     args = parser.parse_args()
 
     train_path = Path(args.train_path)
@@ -108,7 +110,7 @@ def main() -> None:
             raise ValueError("Either provide --input or prepare datasets at --train-path/--test-path")
         raw_df = load_dataset(args.input)
         df = preprocess_bandit_dataframe(raw_df)
-        train_df, test_df = split_train_test_by_date(df, test_ratio=args.test_ratio)
+        train_df, test_df = split_train_test_by_date(df, train_days=args.train_days)
         train_df = train_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
         test_df = test_df.sample(fraction=1.0, shuffle=True, seed=args.seed).sort("date")
         test_df = test_df.filter(pl.col("policy") == "random")
@@ -121,11 +123,22 @@ def main() -> None:
     }
 
     try:
+        import sklearn  # noqa: F401
+        policy_factories["tree_thompson_sampling_refit"] = lambda: TreeThompsonSamplingPolicy(random_state=args.seed, refit_when_update=True)
+    except Exception:
+        print("sklearn is unavailable: skipping TreeThompsonSamplingPolicy")
+
+    try:
         import scipy  # noqa: F401
         policy_factories["laplace_ts_logreg"] = lambda: LaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
         try:
             import torch  # noqa: F401
-            policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(seed=args.seed)
+            hidden_dims = [int(x.strip()) for x in args.neural_hidden_dims.split(",") if x.strip()]
+            policy_factories["neural_laplace_ts_logreg"] = lambda: NeuralLaplaceThompsonViaBayesianLogRegPolicy(
+                seed=args.seed,
+                hidden_dims=hidden_dims,
+                encoder_train_data_mode=args.encoder_train_data_mode,
+            )
         except Exception:
             print("torch is unavailable: skipping NeuralLaplaceThompsonViaBayesianLogRegPolicy")
     except Exception:
@@ -149,7 +162,7 @@ def main() -> None:
         expected_fn = build_expected_reward_estimator(train_df)
         env_reward = make_simulated_environment(proba_predictor=expected_fn, stochastic=args.stochastic_sim, seed=args.seed)
 
-    scenarios = default_five_scenarios() if args.full_scenarios else core_scenarios()
+    scenarios = default_five_scenarios() if args.full_scenarios else default_scenario()
 
     result = run_scenarios(
         train_df=train_df,
@@ -164,6 +177,7 @@ def main() -> None:
     history_df = result["history"]
     action_stats_df = result["action_stats"]
     action_daily_stats_df = result["action_daily_stats"]
+    action_sensitive_stats_df = result["action_sensitive_stats"]
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,16 +185,24 @@ def main() -> None:
     history_path = out_dir / "history.csv"
     action_stats_path = out_dir / "action_stats.csv"
     action_daily_stats_path = out_dir / "action_daily_stats.csv"
+    action_sensitive_stats_path = out_dir / "action_sensitive_stats.csv"
     metrics_df.to_csv(metrics_path, index=False)
     history_df.to_csv(history_path, index=False)
     action_stats_df.to_csv(action_stats_path, index=False)
     action_daily_stats_df.to_csv(action_daily_stats_path, index=False)
+    action_sensitive_stats_df.to_csv(action_sensitive_stats_path, index=False)
 
     print(f"saved metrics: {metrics_path}")
     print(f"saved history: {history_path}")
     print(f"saved action stats: {action_stats_path}")
     print(f"saved action daily stats: {action_daily_stats_path}")
+    print(f"saved action sensitive stats: {action_sensitive_stats_path}")
     print(metrics_df)
+
+    main_cols = ["scenario", "algo", "ips_ctr", "snips_ctr"]
+    if set(main_cols).issubset(metrics_df.columns):
+        print("IPS/SNIPS metrics:")
+        print(metrics_df[main_cols].sort_values(["scenario", "algo"]).to_string(index=False))
 
     sensitive_cols = ["scenario", "algo", "sensitive_impressions", "ips_ctr_sensitive", "ips_regret_sens"]
     if set(sensitive_cols).issubset(metrics_df.columns):
@@ -192,6 +214,8 @@ def main() -> None:
         print(action_stats_df)
         print("action daily stats (impressions by action/day):")
         print(action_daily_stats_df)
+        print("action sensitive stats:")
+        print(action_sensitive_stats_df)
 
     plot_paths = save_plots(history_df, str(out_dir / "plots"))
     if plot_paths:

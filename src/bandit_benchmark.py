@@ -10,13 +10,19 @@ from typing import Callable, Literal
 import pandas as pd
 import polars as pl
 
+from prepare_datasets import (
+    apply_standard_scaler_to_features,
+    filter_test_by_train_candidate_coverage,
+    preprocess_bandit_dataframe,
+    split_train_test_by_date,
+)
+
 try:
     from tqdm.auto import tqdm
 except Exception:  # noqa: BLE001
     tqdm = None
 
 Action = int
-NULL_FEATURE_FILL = 0.0
 
 
 @dataclass
@@ -24,6 +30,7 @@ class ScenarioConfig:
     name: str
     pretrain_source: Literal["random", "all", "none"]
     online_update: bool
+    update_frequency: Literal["daily", "step_2p5"] = "daily"
 
 
 class BasePolicy:
@@ -237,6 +244,278 @@ class OnlineLogisticRegression:
         return np.vstack([1.0 - p, p]).T
 
 
+
+
+class ActionTreeThompsonModel:
+    def __init__(
+        self,
+        max_depth: int = 4,
+        min_samples_leaf: int = 300,
+        alpha0: float = 1.0,
+        beta0: float = 1.0,
+        c_min: int = 5,
+        random_state: int = 42,
+    ):
+        self.max_depth = int(max_depth)
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.alpha0 = float(alpha0)
+        self.beta0 = float(beta0)
+        self.c_min = int(c_min)
+        self.random_state = int(random_state)
+
+        self.tree = None
+        self.leaf_stats: dict[int, dict[str, float | int]] = {}
+        self.global_alpha: float | None = None
+        self.global_beta: float | None = None
+
+    def fit(self, X, y):
+        import numpy as np
+        from sklearn.tree import DecisionTreeClassifier
+
+        X = np.asarray(X)
+        y = np.asarray(y).astype(int)
+
+        self.tree = DecisionTreeClassifier(
+            criterion="log_loss",
+            max_depth=self.max_depth,
+            min_samples_leaf=self.min_samples_leaf,
+            random_state=self.random_state,
+        )
+        self.tree.fit(X, y)
+
+        leaf_ids = self.tree.apply(X)
+        total_clicks = int(y.sum())
+        total_n = int(len(y))
+        self.global_alpha = self.alpha0 + total_clicks
+        self.global_beta = self.beta0 + (total_n - total_clicks)
+
+        self.leaf_stats = {}
+        for leaf in np.unique(leaf_ids):
+            mask = leaf_ids == leaf
+            n = int(mask.sum())
+            c = int(y[mask].sum())
+            self.leaf_stats[int(leaf)] = {
+                "n": n,
+                "clicks": c,
+                "alpha": self.alpha0 + c,
+                "beta": self.beta0 + (n - c),
+            }
+        return self
+
+    def _ensure_fitted(self):
+        if self.tree is None:
+            raise RuntimeError("Model is not fitted yet.")
+
+    def _to_2d(self, X):
+        import numpy as np
+
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        return X
+
+    def _leaf_ids(self, X):
+        self._ensure_fitted()
+        X = self._to_2d(X)
+        return self.tree.apply(X)
+
+    def _effective_stats_for_leaf(self, leaf_id: int) -> dict[str, float | int | bool]:
+        leaf_id = int(leaf_id)
+        stats = self.leaf_stats.get(leaf_id)
+
+        if stats is None:
+            return {
+                "n": 0,
+                "clicks": 0,
+                "alpha": self.global_alpha,
+                "beta": self.global_beta,
+                "used_global_fallback": True,
+            }
+
+        if int(stats["clicks"]) < self.c_min:
+            return {
+                "n": stats["n"],
+                "clicks": stats["clicks"],
+                "alpha": self.global_alpha,
+                "beta": self.global_beta,
+                "used_global_fallback": True,
+            }
+
+        return {
+            "n": stats["n"],
+            "clicks": stats["clicks"],
+            "alpha": stats["alpha"],
+            "beta": stats["beta"],
+            "used_global_fallback": False,
+        }
+
+    def get_leaf_stats(self, X):
+        leaf_ids = self._leaf_ids(X)
+        return [self._effective_stats_for_leaf(int(leaf)) for leaf in leaf_ids]
+
+    def sample_proba(self, X, n_samples: int = 1, random_state: int | None = None):
+        import numpy as np
+
+        rng = np.random.default_rng(random_state)
+        stats = self.get_leaf_stats(X)
+        alpha = np.array([float(s["alpha"]) for s in stats], dtype=float)
+        beta = np.array([float(s["beta"]) for s in stats], dtype=float)
+
+        if n_samples == 1:
+            return rng.beta(alpha, beta)
+
+        return rng.beta(
+            np.broadcast_to(alpha, (n_samples, len(alpha))),
+            np.broadcast_to(beta, (n_samples, len(beta))),
+        )
+
+    def update_batch(self, X, y):
+        import numpy as np
+
+        self._ensure_fitted()
+        X = self._to_2d(X)
+        y = np.asarray(y).astype(int)
+
+        leaf_ids = self.tree.apply(X)
+        for leaf, reward in zip(leaf_ids, y):
+            leaf = int(leaf)
+            if leaf not in self.leaf_stats:
+                self.leaf_stats[leaf] = {
+                    "n": 0,
+                    "clicks": 0,
+                    "alpha": self.alpha0,
+                    "beta": self.beta0,
+                }
+
+            self.leaf_stats[leaf]["n"] = int(self.leaf_stats[leaf]["n"]) + 1
+            self.leaf_stats[leaf]["clicks"] = int(self.leaf_stats[leaf]["clicks"]) + int(reward)
+            self.leaf_stats[leaf]["alpha"] = float(self.leaf_stats[leaf]["alpha"]) + int(reward)
+            self.leaf_stats[leaf]["beta"] = float(self.leaf_stats[leaf]["beta"]) + int(1 - reward)
+
+        self.global_alpha = float(self.global_alpha) + int(y.sum())
+        self.global_beta = float(self.global_beta) + int(len(y) - y.sum())
+
+
+class TreeThompsonSamplingPolicy(BasePolicy):
+    def __init__(
+        self,
+        max_depth: int = 4,
+        min_samples_leaf: int = 300,
+        alpha0: float = 1.0,
+        beta0: float = 1.0,
+        c_min: int = 5,
+        random_state: int = 42,
+        refit_when_update: bool = False,
+        can_update_online: bool | None = True,
+    ):
+        super().__init__(can_update_online=can_update_online)
+        self.max_depth = int(max_depth)
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.alpha0 = float(alpha0)
+        self.beta0 = float(beta0)
+        self.c_min = int(c_min)
+        self.random_state = int(random_state)
+        self.refit_when_update = bool(refit_when_update)
+
+        self.action_models: dict[int, ActionTreeThompsonModel] = {}
+        # per-action storage of (features, reward, action)
+        self.action_history: dict[int, list[tuple[list[float], float, int]]] = {}
+
+    def _build_model(self) -> ActionTreeThompsonModel:
+        return ActionTreeThompsonModel(
+            max_depth=self.max_depth,
+            min_samples_leaf=self.min_samples_leaf,
+            alpha0=self.alpha0,
+            beta0=self.beta0,
+            c_min=self.c_min,
+            random_state=self.random_state,
+        )
+
+    def fit(self, train_df: pl.DataFrame) -> None:
+        import numpy as np
+
+        rows = list(train_df.iter_rows(named=True))
+        self.action_models = {}
+        self.action_history = {}
+
+        for r in rows:
+            a = int(r["show"])
+            feat = [float(v) for v in r["features_list"]]
+            rew = float(r["reward"])
+            self.action_history.setdefault(a, []).append((feat, rew, a))
+
+        for a, items in self.action_history.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+            if len(X) == 0:
+                continue
+            model = self._build_model().fit(X, y)
+            self.action_models[a] = model
+
+    def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
+        import numpy as np
+
+        del row
+        if not candidates:
+            raise ValueError("Empty candidate set")
+
+        x = np.asarray(features, dtype=float)
+        best_a = int(candidates[0])
+        best_score = -1.0
+
+        rng = np.random.default_rng(self.random_state)
+        for a in candidates:
+            aa = int(a)
+            model = self.action_models.get(aa)
+            if model is None or model.tree is None:
+                score = float(rng.beta(self.alpha0, self.beta0))
+            else:
+                score = float(model.sample_proba(x, n_samples=1, random_state=self.random_state)[0])
+            if score > best_score:
+                best_score = score
+                best_a = aa
+        return best_a
+
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        import numpy as np
+
+        if not pending_updates:
+            return
+
+        for a, r, f in pending_updates:
+            aa = int(a)
+            ff = [float(v) for v in f]
+            rr = float(r)
+            self.action_history.setdefault(aa, []).append((ff, rr, aa))
+
+        if self.refit_when_update:
+            for a, items in self.action_history.items():
+                X = np.asarray([it[0] for it in items], dtype=float)
+                y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+                if len(X) == 0:
+                    continue
+                self.action_models[a] = self._build_model().fit(X, y)
+            return
+
+        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        for a, r, f in pending_updates:
+            grouped.setdefault(int(a), []).append(([float(v) for v in f], float(r), int(a)))
+
+        for a, items in grouped.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+            if a in self.action_models and self.action_models[a].tree is not None:
+                self.action_models[a].update_batch(X, y)
+            else:
+                # new action: fit tree on all stored samples for this action
+                all_items = self.action_history.get(a, items)
+                Xa = np.asarray([it[0] for it in all_items], dtype=float)
+                ya = np.asarray([1 if it[1] > 0 else 0 for it in all_items], dtype=int)
+                if len(Xa) == 0:
+                    continue
+                self.action_models[a] = self._build_model().fit(Xa, ya)
+
+
 class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
     """Per-action Bayesian online logistic TS with Laplace-style diagonal precision."""
 
@@ -408,7 +687,17 @@ class _NeuralActionRewardEncoder:
         )
         self.loss_fn = nn.BCEWithLogitsLoss()
 
-    def train_encoder(self, X, action_idx, reward, epochs: int, batch_size: int) -> None:
+    def train_encoder(
+        self,
+        X,
+        action_idx,
+        reward,
+        epochs: int,
+        batch_size: int,
+        val_fraction: float = 0.2,
+        early_stopping_patience: int = 5,
+        min_delta: float = 1e-4,
+    ) -> None:
         import torch
 
         X_t = torch.as_tensor(X, dtype=torch.float32)
@@ -418,9 +707,25 @@ class _NeuralActionRewardEncoder:
         if n == 0:
             return
 
+        all_idx = torch.randperm(n)
+        val_size = 0
+        if n > 1 and val_fraction > 0:
+            val_size = max(1, min(n - 1, int(round(n * float(val_fraction)))))
+
+        val_idx = all_idx[:val_size]
+        train_idx = all_idx[val_size:] if val_size > 0 else all_idx
+        if train_idx.numel() == 0:
+            train_idx = all_idx
+            val_idx = all_idx[:0]
+            val_size = 0
+
+        best_val_loss = float("inf")
+        best_state: dict[str, dict[str, torch.Tensor]] | None = None
+        patience_left = max(1, int(early_stopping_patience))
+
         for _ in range(max(1, int(epochs))):
-            perm = torch.randperm(n)
-            for st in range(0, n, max(1, int(batch_size))):
+            perm = train_idx[torch.randperm(train_idx.numel())]
+            for st in range(0, perm.numel(), max(1, int(batch_size))):
                 idx = perm[st : st + max(1, int(batch_size))]
                 xb = X_t[idx]
                 ab = a_t[idx]
@@ -435,6 +740,35 @@ class _NeuralActionRewardEncoder:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+
+            if val_size > 0:
+                with torch.no_grad():
+                    vb = X_t[val_idx]
+                    vab = a_t[val_idx]
+                    vrb = r_t[val_idx]
+                    vz = self.trunk(vb)
+                    vrep = self.rep_layer(vz)
+                    vlogits = self.head(vrep)
+                    vchosen = vlogits.gather(1, vab.view(-1, 1)).squeeze(1)
+                    val_loss = float(self.loss_fn(vchosen, vrb).item())
+
+                if val_loss < (best_val_loss - float(min_delta)):
+                    best_val_loss = val_loss
+                    best_state = {
+                        "trunk": {k: v.detach().cpu().clone() for k, v in self.trunk.state_dict().items()},
+                        "rep_layer": {k: v.detach().cpu().clone() for k, v in self.rep_layer.state_dict().items()},
+                        "head": {k: v.detach().cpu().clone() for k, v in self.head.state_dict().items()},
+                    }
+                    patience_left = max(1, int(early_stopping_patience))
+                else:
+                    patience_left -= 1
+                    if patience_left <= 0:
+                        break
+
+        if best_state is not None:
+            self.trunk.load_state_dict(best_state["trunk"])
+            self.rep_layer.load_state_dict(best_state["rep_layer"])
+            self.head.load_state_dict(best_state["head"])
 
     def transform(self, X):
         import torch
@@ -459,10 +793,12 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         maxiter_batch: int = 20,
         maxiter_fit: int = 50,
         hidden_dims: list[int] | None = None,
+        encoder: _NeuralActionRewardEncoder | None = None,
         rep_dim: int = 32,
         nn_lr: float = 1e-3,
         nn_epochs: int = 10,
         nn_batch_size: int = 256,
+        encoder_train_data_mode: Literal["all", "random_half", "time_half"] = "all",
         seed: int | None = None,
         can_update_online: bool | None = None,
     ) -> None:
@@ -470,8 +806,10 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self.hidden_dims = hidden_dims or [64, 32]
         self.rep_dim = int(rep_dim)
         self.nn_lr = float(nn_lr)
+        self._provided_encoder = encoder
         self.nn_epochs = int(nn_epochs)
         self.nn_batch_size = int(nn_batch_size)
+        self.encoder_train_data_mode = encoder_train_data_mode
         self.seed = seed
 
         self._encoder: _NeuralActionRewardEncoder | None = None
@@ -504,27 +842,60 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if not rows:
             return
 
-        X = np.asarray([list(r["features_list"]) for r in rows], dtype=np.float32)
         actions = sorted({int(r["show"]) for r in rows})
         self._action_to_idx = {a: i for i, a in enumerate(actions)}
-        a_idx = np.asarray([self._action_to_idx[int(r["show"])] for r in rows], dtype=np.int64)
-        y = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in rows], dtype=np.float32)
 
-        self._encoder = _NeuralActionRewardEncoder(
-            input_dim=X.shape[1],
-            num_actions=len(actions),
-            hidden_dims=self.hidden_dims,
-            rep_dim=self.rep_dim,
-            lr=self.nn_lr,
-            seed=self.seed,
+        mode = self.encoder_train_data_mode
+        if mode not in {"all", "random_half", "time_half"}:
+            raise ValueError(f"Unknown encoder_train_data_mode: {mode}")
+
+        encoder_rows = rows
+        reg_rows = rows
+        n_rows = len(rows)
+
+        if mode == "random_half" and n_rows > 1:
+            rng = np.random.default_rng(self.seed)
+            perm = rng.permutation(n_rows)
+            split = max(1, n_rows // 2)
+            enc_idx = perm[:split]
+            reg_idx = perm[split:]
+            encoder_rows = [rows[int(i)] for i in enc_idx.tolist()]
+            reg_rows = [rows[int(i)] for i in reg_idx.tolist()] if len(reg_idx) > 0 else encoder_rows
+        elif mode == "time_half" and n_rows > 1:
+            ordered_rows = sorted(rows, key=lambda r: r.get("date"))
+            split = max(1, n_rows // 2)
+            encoder_rows = ordered_rows[:split]
+            reg_rows = ordered_rows[split:] if split < n_rows else encoder_rows
+
+        X_enc = np.asarray([list(r["features_list"]) for r in encoder_rows], dtype=np.float32)
+        a_idx_enc = np.asarray([self._action_to_idx[int(r["show"])] for r in encoder_rows], dtype=np.int64)
+        y_enc = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in encoder_rows], dtype=np.float32)
+
+        if self._provided_encoder is not None:
+            self._encoder = self._provided_encoder
+        else:
+            self._encoder = _NeuralActionRewardEncoder(
+                input_dim=X_enc.shape[1],
+                num_actions=len(actions),
+                hidden_dims=self.hidden_dims,
+                rep_dim=self.rep_dim,
+                lr=self.nn_lr,
+                seed=self.seed,
+            )
+        self._encoder.train_encoder(
+            X_enc,
+            a_idx_enc,
+            y_enc,
+            epochs=self.nn_epochs,
+            batch_size=self.nn_batch_size,
         )
-        self._encoder.train_encoder(X, a_idx, y, epochs=self.nn_epochs, batch_size=self.nn_batch_size)
         self._encoder_trained = True
 
-        Z = self._encoder.transform(X)
+        X_reg = np.asarray([list(r["features_list"]) for r in reg_rows], dtype=np.float32)
+        Z_reg = self._encoder.transform(X_reg)
         transformed_updates = [
-            (int(r["show"]), float(r["reward"]), [float(v) for v in Z[i].tolist()])
-            for i, r in enumerate(rows)
+            (int(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
+            for i, r in enumerate(reg_rows)
         ]
 
         by_arm: dict[int, tuple[list, list[int]]] = {}
@@ -878,101 +1249,6 @@ class CatBoostPolicy(BasePolicy):
         return
 
 
-def _parse_candidates(raw: str) -> list[int]:
-    if raw is None or raw == "":
-        return []
-    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
-
-
-def _parse_features(raw: str) -> list[float]:
-    if raw is None or raw == "":
-        return []
-
-    vals: list[float] = []
-    for x in str(raw).split("\\t"):
-        token = str(x).strip().lower()
-        if token == "":
-            continue
-        if token in {"null", "none", "nan"}:
-            vals.append(NULL_FEATURE_FILL)
-        else:
-            vals.append(float(token))
-    return vals
-
-
-def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
-    req = {"policy", "reward", "features", "show", "candidates", "date"}
-    missing = req - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    prepared = df.with_columns(
-        [
-            pl.col("show").cast(pl.Int64),
-            pl.col("reward"),
-            pl.col("date").str.to_datetime(strict=False),
-            pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
-            pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
-        ]
-    )
-
-    return prepared.with_columns(
-        (pl.lit(1.0) / pl.col("candidates_list").list.len().cast(pl.Float64)).alias("propensity")
-    )
-
-
-
-
-def apply_standard_scaler_to_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Scale `features_list` with StandardScaler when sklearn is available."""
-    try:
-        import numpy as np
-        from sklearn.preprocessing import StandardScaler
-
-        feat_rows = df.select("features_list").to_series().to_list()
-        non_empty_idx = [i for i, row in enumerate(feat_rows) if isinstance(row, list) and len(row) > 0]
-        if not non_empty_idx:
-            return df
-
-        dim = len(feat_rows[non_empty_idx[0]])
-        valid_idx = [i for i in non_empty_idx if len(feat_rows[i]) == dim]
-        if not valid_idx:
-            return df
-
-        X = np.array([feat_rows[i] for i in valid_idx], dtype=float)
-        scaler = StandardScaler()
-        Xs = scaler.fit_transform(X)
-        for j, i in enumerate(valid_idx):
-            feat_rows[i] = [float(v) for v in Xs[j].tolist()]
-        return df.with_columns(pl.Series("features_list", feat_rows))
-    except Exception:
-        return df
-
-
-def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.DataFrame) -> pl.DataFrame:
-    """Keep test rows whose candidate list is fully covered by train actions.
-
-    A row is preserved only if every action in `candidates_list` exists in train `show` actions.
-    """
-    train_actions = {int(r["show"]) for r in train_df.iter_rows(named=True)}
-    if not train_actions:
-        return test_df.clear()
-
-    keep_mask: list[bool] = []
-    for row in test_df.iter_rows(named=True):
-        candidates = row.get("candidates_list") or []
-        keep_mask.append(all(int(a) in train_actions for a in candidates))
-
-    return test_df.filter(pl.Series("_keep", keep_mask))
-
-def split_train_test_by_date(df: pl.DataFrame, test_ratio: float = 0.2) -> tuple[pl.DataFrame, pl.DataFrame]:
-    if not 0.0 < test_ratio < 1.0:
-        raise ValueError("test_ratio must be in (0,1)")
-    ordered = df.sort("date")
-    split_idx = int(ordered.height * (1.0 - test_ratio))
-    return ordered.slice(0, split_idx), ordered.slice(split_idx, ordered.height - split_idx)
-
-
 def select_pretrain_data(train_df: pl.DataFrame, source: Literal["random", "all", "none"]) -> pl.DataFrame:
     if source == "none":
         return train_df.clear()
@@ -1024,15 +1300,17 @@ def evaluate_policy(
     policy: BasePolicy,
     test_df: pl.DataFrame,
     online_update: bool,
+    update_frequency: Literal["daily", "step_2p5"] = "daily",
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
     ctr_by_action: dict[int, float] | None = None,
     max_random_ctr: float = 0.0,
     initial_seen_actions: set[int] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
+    snips_weight_sum = 0.0
     ips_sensitive_reward_sum = 0.0
     ips_sensitive_regret_sum = 0.0
     sensitive_rows = 0
@@ -1043,6 +1321,7 @@ def evaluate_policy(
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
     selected_action_rows: list[dict[str, object]] = []
+    action_sensitive_stats: dict[int, dict[str, float | int | bool]] = {}
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -1056,6 +1335,12 @@ def evaluate_policy(
 
     pending_updates: list[tuple[int, float, list[float]]] = []
     next_progress_mark = progress_chunk
+    update_chunk = max(1, int(total_steps * 0.025))
+    next_step_update_mark = update_chunk
+
+    sensitive_seen = 0
+    sensitive_ips_reward_cum = 0.0
+    sensitive_ips_regret_cum = 0.0
     seen_actions_total: set[int] = set(initial_seen_actions or set())
     current_day_actions: set[int] = set()
 
@@ -1086,7 +1371,7 @@ def evaluate_policy(
             features = features_batch[offset]
             current_date = row.get("date")
             if prev_date is not None and current_date is not None and current_date > prev_date:
-                if online_update and policy.can_update_online and pending_updates:
+                if update_frequency == "daily" and online_update and policy.can_update_online and pending_updates:
                     policy.update_batch(pending_updates)
                     pending_updates.clear()
 
@@ -1119,8 +1404,10 @@ def evaluate_policy(
             logged_match = int(action == int(row["show"]))
             propensity = float(row.get("propensity", 0.0) or 0.0)
 
-            ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
+            ips_weight = (logged_match / propensity) if propensity > 0 else 0.0
+            ips_reward = ips_weight * logged_reward
             ips_weighted_reward_sum += ips_reward
+            snips_weight_sum += ips_weight
             # Regret-only per-step baseline: max expected CTR among currently available actions.
             candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
             step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
@@ -1131,6 +1418,21 @@ def evaluate_policy(
                 sensitive_rows += 1
                 ips_sensitive_reward_sum += ips_reward
                 ips_sensitive_regret_sum += ips_step_regret
+                sensitive_seen += 1
+                sensitive_ips_reward_cum += ips_reward
+                sensitive_ips_regret_cum += ips_step_regret
+
+                action_stat = action_sensitive_stats.setdefault(
+                    action,
+                    {
+                        "action": action,
+                        "in_train": bool(action in (initial_seen_actions or set())),
+                        "sensitive_impressions": 0,
+                        "cumulative_sensitive_ips_reward": 0.0,
+                    },
+                )
+                action_stat["sensitive_impressions"] = int(action_stat["sensitive_impressions"]) + 1
+                action_stat["cumulative_sensitive_ips_reward"] = float(action_stat["cumulative_sensitive_ips_reward"]) + float(ips_reward)
 
             if env_reward is None:
                 if not logged_match:
@@ -1152,6 +1454,11 @@ def evaluate_policy(
 
             if online_update and policy.can_update_online:
                 pending_updates.append((action, reward, features))
+                if update_frequency == "step_2p5" and step >= next_step_update_mark and pending_updates:
+                    policy.update_batch(pending_updates)
+                    pending_updates.clear()
+                    while next_step_update_mark <= step:
+                        next_step_update_mark += update_chunk
 
             history_rows.append(
                 {
@@ -1164,6 +1471,9 @@ def evaluate_policy(
                     "avg_regret": cumulative_regret / used,
                     "cumulative_ips_regret": cumulative_ips_regret,
                     "avg_ips_regret": cumulative_ips_regret / step,
+                    "sensitive_impressions_so_far": sensitive_seen,
+                    "ips_ctr_sensitive_so_far": (sensitive_ips_reward_cum / sensitive_seen) if sensitive_seen else 0.0,
+                    "avg_ips_regret_sens_so_far": (sensitive_ips_regret_cum / sensitive_seen) if sensitive_seen else 0.0,
                 }
             )
 
@@ -1189,8 +1499,13 @@ def evaluate_policy(
         pbar.update(test_df.height - pbar.n)
         pbar.close()
 
+    if online_update and policy.can_update_online and pending_updates:
+        policy.update_batch(pending_updates)
+        pending_updates.clear()
+
     ctr = total_reward / used if used else 0.0
     ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
+    snips_ctr = (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
     final_avg_regret = (cumulative_regret / used) if used else 0.0
     final_avg_ips_regret = (cumulative_ips_regret / test_df.height) if test_df.height else 0.0
@@ -1204,6 +1519,7 @@ def evaluate_policy(
             "ctr": ctr,
             "ips_weighted_reward": ips_weighted_reward_sum,
             "ips_ctr": ips_ctr,
+            "snips_ctr": snips_ctr,
             "replay_match_rate": match_rate,
             "cumulative_regret": cumulative_regret,
             "avg_regret": final_avg_regret,
@@ -1225,7 +1541,17 @@ def evaluate_policy(
     else:
         action_daily_stats_df = pd.DataFrame(columns=["date", "action", "impressions_selected"])
 
-    return metrics_df, history_df, action_stats_df, action_daily_stats_df
+    if action_sensitive_stats:
+        action_sensitive_df = pd.DataFrame(list(action_sensitive_stats.values()))
+        action_sensitive_df["sensitive_ips_ctr"] = action_sensitive_df.apply(
+            lambda r: (float(r["cumulative_sensitive_ips_reward"]) / int(r["sensitive_impressions"])) if int(r["sensitive_impressions"]) > 0 else 0.0,
+            axis=1,
+        )
+        action_sensitive_df = action_sensitive_df.sort_values("sensitive_ips_ctr", ascending=False).reset_index(drop=True)
+    else:
+        action_sensitive_df = pd.DataFrame(columns=["action", "in_train", "sensitive_impressions", "cumulative_sensitive_ips_reward", "sensitive_ips_ctr"])
+
+    return metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df
 
 
 def run_scenarios(
@@ -1240,6 +1566,7 @@ def run_scenarios(
     history_parts: list[pd.DataFrame] = []
     action_stats_parts: list[pd.DataFrame] = []
     action_daily_stats_parts: list[pd.DataFrame] = []
+    action_sensitive_parts: list[pd.DataFrame] = []
     trained_models: dict[str, dict[str, BasePolicy]] = {}
 
     for scenario in scenarios:
@@ -1256,10 +1583,11 @@ def run_scenarios(
 
             initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
-            metrics_df, history_df, action_stats_df, action_daily_stats_df = evaluate_policy(
+            metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df = evaluate_policy(
                 policy=policy,
                 test_df=test_df,
                 online_update=scenario.online_update,
+                update_frequency=scenario.update_frequency,
                 env_reward=env_reward,
                 show_progress=show_progress,
                 progress_desc=f"{scenario.name}/{algo_name}",
@@ -1287,15 +1615,22 @@ def run_scenarios(
                 action_daily_stats_df["algo"] = algo_name
                 action_daily_stats_parts.append(action_daily_stats_df)
 
+            if not action_sensitive_df.empty:
+                action_sensitive_df["scenario"] = scenario.name
+                action_sensitive_df["algo"] = algo_name
+                action_sensitive_parts.append(action_sensitive_df)
+
     out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
     out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
     out_action_stats = pd.concat(action_stats_parts, ignore_index=True) if action_stats_parts else pd.DataFrame()
     out_action_daily_stats = pd.concat(action_daily_stats_parts, ignore_index=True) if action_daily_stats_parts else pd.DataFrame()
+    out_action_sensitive_stats = pd.concat(action_sensitive_parts, ignore_index=True) if action_sensitive_parts else pd.DataFrame()
     return {
         "metrics": out_metrics,
         "history": out_history,
         "action_stats": out_action_stats,
         "action_daily_stats": out_action_daily_stats,
+        "action_sensitive_stats": out_action_sensitive_stats,
         "trained_models": trained_models,
     }
 
@@ -1319,12 +1654,29 @@ def make_simulated_environment(
 def default_five_scenarios() -> list[ScenarioConfig]:
     return [
         ScenarioConfig("case_1_random_pretrain_predict_only", "random", False),
-        ScenarioConfig("case_2_random_pretrain_online_update", "random", True),
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+        ScenarioConfig("case_2b_random_pretrain_online_update_step_2p5", "random", True, "step_2p5"),
         ScenarioConfig("case_3_all_pretrain_predict_only", "all", False),
-        ScenarioConfig("case_4_all_pretrain_online_update", "all", True),
-        ScenarioConfig("case_5_no_pretrain_online_update", "none", True),
+        ScenarioConfig("case_4_all_pretrain_online_update_daily", "all", True, "daily"),
+        ScenarioConfig("case_4b_all_pretrain_online_update_step_2p5", "all", True, "step_2p5"),
+        ScenarioConfig("case_5_no_pretrain_online_update_daily", "none", True, "daily"),
+        ScenarioConfig("case_5b_no_pretrain_online_update_step_2p5", "none", True, "step_2p5"),
+    ]
+
+
+def default_scenario() -> list[ScenarioConfig]:
+    return [
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+    ]
+
+
+def two_ways_default_scenario() -> list[ScenarioConfig]:
+    return [
+        ScenarioConfig("case_2_random_pretrain_online_update_daily", "random", True, "daily"),
+        ScenarioConfig("case_2b_random_pretrain_online_update_step_2p5", "random", True, "step_2p5"),
     ]
 
 
 def core_scenarios() -> list[ScenarioConfig]:
-    return [ScenarioConfig("case_2_random_pretrain_online_update", "random", True)]
+    """Backward-compatible alias for previous default (two ways)."""
+    return two_ways_default_scenario()
