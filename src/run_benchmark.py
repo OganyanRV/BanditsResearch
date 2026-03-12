@@ -199,6 +199,11 @@ def main() -> None:
     print(f"saved action sensitive stats: {action_sensitive_stats_path}")
     print(metrics_df)
 
+    main_cols = ["scenario", "algo", "ips_ctr", "snips_ctr"]
+    if set(main_cols).issubset(metrics_df.columns):
+        print("IPS/SNIPS metrics:")
+        print(metrics_df[main_cols].sort_values(["scenario", "algo"]).to_string(index=False))
+
     sensitive_cols = ["scenario", "algo", "sensitive_impressions", "ips_ctr_sensitive", "ips_regret_sens"]
     if set(sensitive_cols).issubset(metrics_df.columns):
         print("sensitive IPS metrics (rows with len(candidates) > 1):")

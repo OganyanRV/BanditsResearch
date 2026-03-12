@@ -1310,6 +1310,7 @@ def evaluate_policy(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
+    snips_weight_sum = 0.0
     ips_sensitive_reward_sum = 0.0
     ips_sensitive_regret_sum = 0.0
     sensitive_rows = 0
@@ -1403,8 +1404,10 @@ def evaluate_policy(
             logged_match = int(action == int(row["show"]))
             propensity = float(row.get("propensity", 0.0) or 0.0)
 
-            ips_reward = (logged_match * logged_reward / propensity) if propensity > 0 else 0.0
+            ips_weight = (logged_match / propensity) if propensity > 0 else 0.0
+            ips_reward = ips_weight * logged_reward
             ips_weighted_reward_sum += ips_reward
+            snips_weight_sum += ips_weight
             # Regret-only per-step baseline: max expected CTR among currently available actions.
             candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
             step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
@@ -1502,6 +1505,7 @@ def evaluate_policy(
 
     ctr = total_reward / used if used else 0.0
     ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
+    snips_ctr = (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
     final_avg_regret = (cumulative_regret / used) if used else 0.0
     final_avg_ips_regret = (cumulative_ips_regret / test_df.height) if test_df.height else 0.0
@@ -1515,6 +1519,7 @@ def evaluate_policy(
             "ctr": ctr,
             "ips_weighted_reward": ips_weighted_reward_sum,
             "ips_ctr": ips_ctr,
+            "snips_ctr": snips_ctr,
             "replay_match_rate": match_rate,
             "cumulative_regret": cumulative_regret,
             "avg_regret": final_avg_regret,
