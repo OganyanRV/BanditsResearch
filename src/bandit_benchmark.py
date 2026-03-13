@@ -57,6 +57,19 @@ class BasePolicy:
             for candidates, features, row in zip(candidates_batch, features_batch, rows_batch)
         ]
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        if not candidates or int(action) not in candidates:
+            return 0.0
+        if features is None:
+            return 0.0
+        return 1.0 if int(self.select(candidates, features, row or {})) == int(action) else 0.0
+
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
 
@@ -85,6 +98,17 @@ class RandomPolicy(BasePolicy):
             raise ValueError("Empty candidate set")
         return int(self.rng.choice(candidates))
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        del features, row
+        if not candidates or int(action) not in candidates:
+            return 0.0
+        return 1.0 / len(candidates)
 
 
 class EpsilonGreedyPolicy(BasePolicy):
@@ -102,6 +126,22 @@ class EpsilonGreedyPolicy(BasePolicy):
         if self.rng.random() < self.epsilon:
             return self.rng.choice(candidates)
         return max(candidates, key=lambda a: self.values.get(a, 0.0))
+
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        del features, row
+        if not candidates or int(action) not in candidates:
+            return 0.0
+        uniform_p = self.epsilon / len(candidates)
+        best_value = max(self.values.get(int(a), 0.0) for a in candidates)
+        greedy_actions = [int(a) for a in candidates if self.values.get(int(a), 0.0) == best_value]
+        exploit_p = (1.0 - self.epsilon) / max(1, len(greedy_actions)) if int(action) in greedy_actions else 0.0
+        return uniform_p + exploit_p
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
@@ -129,6 +169,22 @@ class UCBPolicy(BasePolicy):
         log_t = math.log(max(self.t, 1))
         return max(candidates, key=lambda a: self.values[a] + math.sqrt(self.exploration * log_t / self.counts[a]))
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        del features, row
+        if not candidates or int(action) not in candidates:
+            return 0.0
+        untried = [int(a) for a in candidates if self.counts.get(int(a), 0) == 0]
+        if untried:
+            return 1.0 if int(action) == untried[0] else 0.0
+        chosen = int(max(candidates, key=lambda a: self.values.get(int(a), 0.0) + math.sqrt(self.exploration * math.log(max(self.t, 1)) / max(1, self.counts.get(int(a), 1)))))
+        return 1.0 if int(action) == chosen else 0.0
+
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
         self.t += 1
@@ -152,6 +208,31 @@ class ThompsonSamplingPolicy(BasePolicy):
         if not candidates:
             raise ValueError("Empty candidate set")
         return max(candidates, key=lambda a: self.rng.betavariate(self.alpha.get(a, self.alpha0), self.beta.get(a, self.beta0)))
+
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        import numpy as np
+
+        del features, row
+        if not candidates or int(action) not in candidates:
+            return 0.0
+        n_mc = 256
+        rng = np.random.default_rng(42)
+        wins = 0
+        target = int(action)
+        for _ in range(n_mc):
+            draws = {
+                int(a): float(rng.beta(self.alpha.get(int(a), self.alpha0), self.beta.get(int(a), self.beta0)))
+                for a in candidates
+            }
+            best = max(draws.items(), key=lambda kv: kv[1])[0]
+            wins += int(best == target)
+        return wins / n_mc
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
@@ -476,6 +557,39 @@ class TreeThompsonSamplingPolicy(BasePolicy):
                 best_a = aa
         return best_a
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        import numpy as np
+
+        del row
+        if features is None or not candidates or int(action) not in candidates:
+            return 0.0
+        x = np.asarray(features, dtype=float)
+        n_mc = 128
+        wins = 0
+        target = int(action)
+        rng = np.random.default_rng(self.random_state)
+        for _ in range(n_mc):
+            best_a = int(candidates[0])
+            best_score = -1.0
+            for a in candidates:
+                aa = int(a)
+                model = self.action_models.get(aa)
+                if model is None or model.tree is None:
+                    score = float(rng.beta(self.alpha0, self.beta0))
+                else:
+                    score = float(model.sample_proba(x, n_samples=1, random_state=self.random_state)[0])
+                if score > best_score:
+                    best_score = score
+                    best_a = aa
+            wins += int(best_a == target)
+        return wins / n_mc
+
     def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
         import numpy as np
 
@@ -645,7 +759,35 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
 
         return best_a
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        import numpy as np
 
+        del row
+        if features is None or not candidates or int(action) not in candidates:
+            return 0.0
+        self._ensure_dim(features)
+        x = np.asarray(features, dtype=np.float64).reshape(1, -1)
+        n_mc = 128
+        wins = 0
+        target = int(action)
+        for _ in range(n_mc):
+            best_a = int(candidates[0])
+            best_score = -np.inf
+            for a_raw in candidates:
+                a = int(a_raw)
+                model = self._get_model(a)
+                p = float(model.predict_proba(x, mode="sample")[0, 1])
+                if p > best_score:
+                    best_score = p
+                    best_a = a
+            wins += int(best_a == target)
+        return wins / n_mc
 
 
 class _NeuralActionRewardEncoder:
@@ -1244,6 +1386,25 @@ class CatBoostPolicy(BasePolicy):
                 best_action = int(a)
         return best_action
 
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        del row
+        if features is None or not candidates or int(action) not in candidates:
+            return 0.0
+        if self._model is None:
+            return 1.0 if int(action) == int(candidates[0]) else 0.0
+        scores = {}
+        for a in candidates:
+            vec = self._row_to_vector(features, int(a))
+            scores[int(a)] = float(self._model.predict_proba([vec])[0][1])
+        best = max(scores.items(), key=lambda kv: kv[1])[0]
+        return 1.0 if int(action) == best else 0.0
+
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
         return
@@ -1636,6 +1797,75 @@ def run_scenarios(
         "trained_models": trained_models,
     }
 
+
+
+def run_scenarios_ips(
+    train_df: pl.DataFrame,
+    test_df: pl.DataFrame,
+    policy_factories: dict[str, Callable[[], BasePolicy]],
+    scenarios: list[ScenarioConfig],
+    show_progress: bool = True,
+) -> dict[str, pd.DataFrame]:
+    metrics_parts: list[pd.DataFrame] = []
+    trained_models: dict[str, dict[str, BasePolicy]] = {}
+
+    for scenario in scenarios:
+        pretrain_df = select_pretrain_data(train_df, scenario.pretrain_source)
+        trained_models[scenario.name] = {}
+
+        for algo_name, make_policy in policy_factories.items():
+            policy = make_policy()
+            if pretrain_df.height > 0:
+                policy.fit(pretrain_df)
+
+            ips_weighted_reward_sum = 0.0
+            snips_weight_sum = 0.0
+            ips_sensitive_reward_sum = 0.0
+            sensitive_rows = 0
+            test_rows = list(test_df.iter_rows(named=True))
+
+            for row in test_rows:
+                candidates = row["candidates_list"]
+                features = row["features_list"]
+                logged_action = int(row["show"])
+                logged_reward = float(row["reward"])
+                propensity = float(row.get("propensity", 0.0) or 0.0)
+
+                target_proba = policy.get_action_proba(candidates, logged_action, features, row)
+                ips_weight = (target_proba / propensity) if propensity > 0 else 0.0
+                ips_reward = ips_weight * logged_reward
+                ips_weighted_reward_sum += ips_reward
+                snips_weight_sum += ips_weight
+
+                if len(candidates) > 1:
+                    sensitive_rows += 1
+                    ips_sensitive_reward_sum += ips_reward
+
+            metrics_df = pd.DataFrame([
+                {
+                    "impressions_total": test_df.height,
+                    "ips_weighted_reward": ips_weighted_reward_sum,
+                    "ips_ctr": (ips_weighted_reward_sum / test_df.height) if test_df.height else 0.0,
+                    "snips_ctr": (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0,
+                    "impressions_extrapolated": snips_weight_sum,
+                    "sensitive_impressions": sensitive_rows,
+                    "ips_ctr_sensitive": (ips_sensitive_reward_sum / sensitive_rows) if sensitive_rows else 0.0,
+                    "scenario": scenario.name,
+                    "algo": algo_name,
+                }
+            ])
+            metrics_parts.append(metrics_df)
+            trained_models[scenario.name][algo_name] = policy
+
+    out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
+    return {
+        "metrics": out_metrics,
+        "history": pd.DataFrame(),
+        "action_stats": pd.DataFrame(),
+        "action_daily_stats": pd.DataFrame(),
+        "action_sensitive_stats": pd.DataFrame(),
+        "trained_models": trained_models,
+    }
 
 def make_simulated_environment(
     proba_predictor: Callable[[dict[str, object], Action], float],
