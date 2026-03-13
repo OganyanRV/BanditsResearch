@@ -1799,6 +1799,199 @@ def run_scenarios(
 
 
 
+
+def evaluate_policy_ips(
+    policy: BasePolicy,
+    test_df: pl.DataFrame,
+    online_update: bool,
+    update_frequency: Literal["daily", "step_2p5"] = "daily",
+    show_progress: bool = True,
+    progress_desc: str = "evaluate_ips",
+    initial_seen_actions: set[int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ips_weighted_reward_sum = 0.0
+    snips_weight_sum = 0.0
+    ips_sensitive_reward_sum = 0.0
+    sensitive_rows = 0
+
+    history_rows: list[dict[str, float | int]] = []
+    action_stats_rows: list[dict[str, int]] = []
+    selected_action_rows: list[dict[str, object]] = []
+    action_sensitive_stats: dict[int, dict[str, float | int | bool]] = {}
+
+    total_steps = max(test_df.height, 1)
+    progress_chunk = max(1, int(total_steps * 0.05))
+
+    pbar = None
+    if show_progress and tqdm is not None:
+        pbar = tqdm(total=test_df.height, desc=progress_desc, leave=False, dynamic_ncols=True, mininterval=0.5)
+
+    pending_updates: list[tuple[int, float, list[float]]] = []
+    next_progress_mark = progress_chunk
+    update_chunk = max(1, int(total_steps * 0.025))
+    next_step_update_mark = update_chunk
+
+    sensitive_seen = 0
+    sensitive_ips_reward_cum = 0.0
+    seen_actions_total: set[int] = set(initial_seen_actions or set())
+    current_day_actions: set[int] = set()
+
+    test_rows = list(test_df.iter_rows(named=True))
+    first_row_date = test_rows[0].get("date") if test_rows else None
+    prev_date = first_row_date
+
+    if show_progress:
+        msg = f"{progress_desc}: train_unique_actions={len(seen_actions_total)}"
+        if pbar is not None:
+            pbar.write(msg)
+        else:
+            print(msg)
+
+    for step, row in enumerate(test_rows, start=1):
+        candidates = row["candidates_list"]
+        features = row["features_list"]
+        logged_action = int(row["show"])
+        logged_reward = float(row["reward"])
+        propensity = float(row.get("propensity", 0.0) or 0.0)
+
+        current_date = row.get("date")
+        if prev_date is not None and current_date is not None and current_date > prev_date:
+            if update_frequency == "daily" and online_update and policy.can_update_online and pending_updates:
+                policy.update_batch(pending_updates)
+                pending_updates.clear()
+
+            new_actions_in_day = current_day_actions - seen_actions_total
+            seen_actions_total.update(current_day_actions)
+            action_stats_rows.append(
+                {
+                    "step": step,
+                    "date": prev_date,
+                    "unique_actions_total": len(seen_actions_total),
+                    "unique_actions_new_in_day": len(new_actions_in_day),
+                }
+            )
+            current_day_actions.clear()
+
+        prev_date = current_date if current_date is not None else prev_date
+        current_day_actions.add(logged_action)
+
+        selected_action_rows.append(
+            {
+                "step": step,
+                "date": current_date if current_date is not None else prev_date,
+                "action": logged_action,
+            }
+        )
+
+        target_proba = float(policy.get_action_proba(candidates, logged_action, features, row))
+        ips_weight = (target_proba / propensity) if propensity > 0 else 0.0
+        ips_reward = ips_weight * logged_reward
+        ips_weighted_reward_sum += ips_reward
+        snips_weight_sum += ips_weight
+
+        if len(candidates) > 1:
+            sensitive_rows += 1
+            ips_sensitive_reward_sum += ips_reward
+            sensitive_seen += 1
+            sensitive_ips_reward_cum += ips_reward
+
+            action_stat = action_sensitive_stats.setdefault(
+                logged_action,
+                {
+                    "action": logged_action,
+                    "in_train": bool(logged_action in (initial_seen_actions or set())),
+                    "sensitive_impressions": 0,
+                    "cumulative_sensitive_ips_reward": 0.0,
+                },
+            )
+            action_stat["sensitive_impressions"] = int(action_stat["sensitive_impressions"]) + 1
+            action_stat["cumulative_sensitive_ips_reward"] = float(action_stat["cumulative_sensitive_ips_reward"]) + float(ips_reward)
+
+        if online_update and policy.can_update_online:
+            pending_updates.append((logged_action, logged_reward, features))
+            if update_frequency == "step_2p5" and step >= next_step_update_mark and pending_updates:
+                policy.update_batch(pending_updates)
+                pending_updates.clear()
+                while next_step_update_mark <= step:
+                    next_step_update_mark += update_chunk
+
+        history_rows.append(
+            {
+                "step": step,
+                "ips_reward": ips_reward,
+                "ips_avg_reward": ips_weighted_reward_sum / step,
+                "impressions_extrapolated_so_far": snips_weight_sum,
+                "sensitive_impressions_so_far": sensitive_seen,
+                "ips_ctr_sensitive_so_far": (sensitive_ips_reward_cum / sensitive_seen) if sensitive_seen else 0.0,
+            }
+        )
+
+        if pbar is not None and step >= next_progress_mark:
+            pbar.update(step - pbar.n)
+            next_progress_mark += progress_chunk
+
+    if current_day_actions:
+        new_actions_in_day = current_day_actions - seen_actions_total
+        seen_actions_total.update(current_day_actions)
+        final_step = test_df.height
+        action_stats_rows.append(
+            {
+                "step": final_step,
+                "date": prev_date,
+                "unique_actions_total": len(seen_actions_total),
+                "unique_actions_new_in_day": len(new_actions_in_day),
+            }
+        )
+
+    if pbar is not None:
+        pbar.update(test_df.height - pbar.n)
+        pbar.close()
+
+    if online_update and policy.can_update_online and pending_updates:
+        policy.update_batch(pending_updates)
+        pending_updates.clear()
+
+    ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
+    snips_ctr = (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0
+    impressions_extrapolated = snips_weight_sum
+    ips_ctr_sensitive = (ips_sensitive_reward_sum / sensitive_rows) if sensitive_rows else 0.0
+
+    metrics_df = pd.DataFrame([
+        {
+            "impressions_total": test_df.height,
+            "ips_weighted_reward": ips_weighted_reward_sum,
+            "ips_ctr": ips_ctr,
+            "snips_ctr": snips_ctr,
+            "impressions_extrapolated": impressions_extrapolated,
+            "sensitive_impressions": sensitive_rows,
+            "ips_ctr_sensitive": ips_ctr_sensitive,
+        }
+    ])
+
+    history_df = pd.DataFrame(history_rows)
+    action_stats_df = pd.DataFrame(action_stats_rows)
+
+    selected_df = pd.DataFrame(selected_action_rows)
+    if not selected_df.empty:
+        action_daily_stats_df = selected_df.groupby(["date", "action"], as_index=False).agg(
+            impressions_selected=("action", "size")
+        )
+    else:
+        action_daily_stats_df = pd.DataFrame(columns=["date", "action", "impressions_selected"])
+
+    if action_sensitive_stats:
+        action_sensitive_df = pd.DataFrame(list(action_sensitive_stats.values()))
+        action_sensitive_df["sensitive_ips_ctr"] = action_sensitive_df.apply(
+            lambda r: (float(r["cumulative_sensitive_ips_reward"]) / int(r["sensitive_impressions"])) if int(r["sensitive_impressions"]) > 0 else 0.0,
+            axis=1,
+        )
+        action_sensitive_df = action_sensitive_df.sort_values("sensitive_ips_ctr", ascending=False).reset_index(drop=True)
+    else:
+        action_sensitive_df = pd.DataFrame(columns=["action", "in_train", "sensitive_impressions", "cumulative_sensitive_ips_reward", "sensitive_ips_ctr"])
+
+    return metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df
+
+
 def run_scenarios_ips(
     train_df: pl.DataFrame,
     test_df: pl.DataFrame,
@@ -1807,6 +2000,10 @@ def run_scenarios_ips(
     show_progress: bool = True,
 ) -> dict[str, pd.DataFrame]:
     metrics_parts: list[pd.DataFrame] = []
+    history_parts: list[pd.DataFrame] = []
+    action_stats_parts: list[pd.DataFrame] = []
+    action_daily_stats_parts: list[pd.DataFrame] = []
+    action_sensitive_parts: list[pd.DataFrame] = []
     trained_models: dict[str, dict[str, BasePolicy]] = {}
 
     for scenario in scenarios:
@@ -1818,52 +2015,54 @@ def run_scenarios_ips(
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
-            ips_weighted_reward_sum = 0.0
-            snips_weight_sum = 0.0
-            ips_sensitive_reward_sum = 0.0
-            sensitive_rows = 0
-            test_rows = list(test_df.iter_rows(named=True))
+            initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
-            for row in test_rows:
-                candidates = row["candidates_list"]
-                features = row["features_list"]
-                logged_action = int(row["show"])
-                logged_reward = float(row["reward"])
-                propensity = float(row.get("propensity", 0.0) or 0.0)
-
-                target_proba = policy.get_action_proba(candidates, logged_action, features, row)
-                ips_weight = (target_proba / propensity) if propensity > 0 else 0.0
-                ips_reward = ips_weight * logged_reward
-                ips_weighted_reward_sum += ips_reward
-                snips_weight_sum += ips_weight
-
-                if len(candidates) > 1:
-                    sensitive_rows += 1
-                    ips_sensitive_reward_sum += ips_reward
-
-            metrics_df = pd.DataFrame([
-                {
-                    "impressions_total": test_df.height,
-                    "ips_weighted_reward": ips_weighted_reward_sum,
-                    "ips_ctr": (ips_weighted_reward_sum / test_df.height) if test_df.height else 0.0,
-                    "snips_ctr": (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0,
-                    "impressions_extrapolated": snips_weight_sum,
-                    "sensitive_impressions": sensitive_rows,
-                    "ips_ctr_sensitive": (ips_sensitive_reward_sum / sensitive_rows) if sensitive_rows else 0.0,
-                    "scenario": scenario.name,
-                    "algo": algo_name,
-                }
-            ])
+            metrics_df, history_df, action_stats_df, action_daily_stats_df, action_sensitive_df = evaluate_policy_ips(
+                policy=policy,
+                test_df=test_df,
+                online_update=scenario.online_update,
+                update_frequency=scenario.update_frequency,
+                show_progress=show_progress,
+                progress_desc=f"{scenario.name}/{algo_name}",
+                initial_seen_actions=initial_seen_actions,
+            )
+            metrics_df["scenario"] = scenario.name
+            metrics_df["algo"] = algo_name
             metrics_parts.append(metrics_df)
             trained_models[scenario.name][algo_name] = policy
 
+            if not history_df.empty:
+                history_df["scenario"] = scenario.name
+                history_df["algo"] = algo_name
+                history_parts.append(history_df)
+
+            if not action_stats_df.empty:
+                action_stats_df["scenario"] = scenario.name
+                action_stats_df["algo"] = algo_name
+                action_stats_parts.append(action_stats_df)
+
+            if not action_daily_stats_df.empty:
+                action_daily_stats_df["scenario"] = scenario.name
+                action_daily_stats_df["algo"] = algo_name
+                action_daily_stats_parts.append(action_daily_stats_df)
+
+            if not action_sensitive_df.empty:
+                action_sensitive_df["scenario"] = scenario.name
+                action_sensitive_df["algo"] = algo_name
+                action_sensitive_parts.append(action_sensitive_df)
+
     out_metrics = pd.concat(metrics_parts, ignore_index=True) if metrics_parts else pd.DataFrame()
+    out_history = pd.concat(history_parts, ignore_index=True) if history_parts else pd.DataFrame()
+    out_action_stats = pd.concat(action_stats_parts, ignore_index=True) if action_stats_parts else pd.DataFrame()
+    out_action_daily_stats = pd.concat(action_daily_stats_parts, ignore_index=True) if action_daily_stats_parts else pd.DataFrame()
+    out_action_sensitive_stats = pd.concat(action_sensitive_parts, ignore_index=True) if action_sensitive_parts else pd.DataFrame()
+
     return {
         "metrics": out_metrics,
-        "history": pd.DataFrame(),
-        "action_stats": pd.DataFrame(),
-        "action_daily_stats": pd.DataFrame(),
-        "action_sensitive_stats": pd.DataFrame(),
+        "history": out_history,
+        "action_stats": out_action_stats,
+        "action_daily_stats": out_action_daily_stats,
+        "action_sensitive_stats": out_action_sensitive_stats,
         "trained_models": trained_models,
     }
 
