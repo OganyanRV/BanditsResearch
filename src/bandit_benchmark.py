@@ -1506,6 +1506,7 @@ def evaluate_policy(
     ctr = total_reward / used if used else 0.0
     ips_ctr = ips_weighted_reward_sum / test_df.height if test_df.height else 0.0
     snips_ctr = (ips_weighted_reward_sum / snips_weight_sum) if snips_weight_sum > 0 else 0.0
+    impressions_extrapolated = snips_weight_sum
     match_rate = replay_matches / test_df.height if test_df.height else 0.0
     final_avg_regret = (cumulative_regret / used) if used else 0.0
     final_avg_ips_regret = (cumulative_ips_regret / test_df.height) if test_df.height else 0.0
@@ -1520,6 +1521,7 @@ def evaluate_policy(
             "ips_weighted_reward": ips_weighted_reward_sum,
             "ips_ctr": ips_ctr,
             "snips_ctr": snips_ctr,
+            "impressions_extrapolated": impressions_extrapolated,
             "replay_match_rate": match_rate,
             "cumulative_regret": cumulative_regret,
             "avg_regret": final_avg_regret,
