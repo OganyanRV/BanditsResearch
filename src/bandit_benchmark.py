@@ -488,7 +488,6 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         beta0: float = 1.0,
         c_min: int = 5,
         random_state: int = 42,
-        refit_when_update: bool = False,
         can_update_online: bool | None = True,
     ):
         super().__init__(can_update_online=can_update_online)
@@ -498,7 +497,6 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         self.beta0 = float(beta0)
         self.c_min = int(c_min)
         self.random_state = int(random_state)
-        self.refit_when_update = bool(refit_when_update)
 
         self.action_models: dict[int, ActionTreeThompsonModel] = {}
         # per-action storage of (features, reward, action)
@@ -604,15 +602,6 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             rr = float(r)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
 
-        if self.refit_when_update:
-            for a, items in self.action_history.items():
-                X = np.asarray([it[0] for it in items], dtype=float)
-                y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
-                if len(X) == 0:
-                    continue
-                self.action_models[a] = self._build_model().fit(X, y)
-            return
-
         grouped: dict[int, list[tuple[list[float], float, int]]] = {}
         for a, r, f in pending_updates:
             grouped.setdefault(int(a), []).append(([float(v) for v in f], float(r), int(a)))
@@ -630,6 +619,33 @@ class TreeThompsonSamplingPolicy(BasePolicy):
                 if len(Xa) == 0:
                     continue
                 self.action_models[a] = self._build_model().fit(Xa, ya)
+
+
+class TreeThompsonSamplingPolicyUpdateV1(TreeThompsonSamplingPolicy):
+    """Incremental tree updates via ActionTreeThompsonModel.update_batch."""
+
+
+class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
+    """Refits per-action trees on full stored history at each update."""
+
+    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+        import numpy as np
+
+        if not pending_updates:
+            return
+
+        for a, r, f in pending_updates:
+            aa = int(a)
+            ff = [float(v) for v in f]
+            rr = float(r)
+            self.action_history.setdefault(aa, []).append((ff, rr, aa))
+
+        for a, items in self.action_history.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+            if len(X) == 0:
+                continue
+            self.action_models[a] = self._build_model().fit(X, y)
 
 
 class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
@@ -1315,6 +1331,7 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
 
 
 # Backward-compatible aliases
+TreeThompsonSamplingPolicyV1 = TreeThompsonSamplingPolicyUpdateV1
 LogisticTSPolicy = LogisticTSLibPolicy
 PartitionedTSPolicy = PartitionedTSLibPolicy
 
