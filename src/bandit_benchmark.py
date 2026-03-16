@@ -348,6 +348,8 @@ class ActionTreeThompsonModel:
         self.leaf_stats: dict[int, dict[str, float | int]] = {}
         self.global_alpha: float | None = None
         self.global_beta: float | None = None
+        import numpy as np
+        self._rng = np.random.default_rng(self.random_state)
 
     def fit(self, X, y):
         import numpy as np
@@ -437,7 +439,7 @@ class ActionTreeThompsonModel:
     def sample_proba(self, X, n_samples: int = 1, random_state: int | None = None):
         import numpy as np
 
-        rng = np.random.default_rng(random_state)
+        rng = np.random.default_rng(random_state) if random_state is not None else self._rng
         stats = self.get_leaf_stats(X)
         alpha = np.array([float(s["alpha"]) for s in stats], dtype=float)
         beta = np.array([float(s["beta"]) for s in stats], dtype=float)
@@ -551,7 +553,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             if model is None or model.tree is None:
                 score = float(rng.beta(self.alpha0, self.beta0))
             else:
-                score = float(model.sample_proba(x, n_samples=1, random_state=self.random_state)[0])
+                score = float(model.sample_proba(x, n_samples=1)[0])
             if score > best_score:
                 best_score = score
                 best_a = aa
@@ -583,7 +585,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
                 if model is None or model.tree is None:
                     score = float(rng.beta(self.alpha0, self.beta0))
                 else:
-                    score = float(model.sample_proba(x, n_samples=1, random_state=self.random_state)[0])
+                    score = float(model.sample_proba(x, n_samples=1)[0])
                 if score > best_score:
                     best_score = score
                     best_a = aa
@@ -1068,6 +1070,18 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         return self._base.select(candidates, self._transform_features(features), row)
+
+    def get_action_proba(
+        self,
+        candidates: list[Action],
+        action: Action,
+        features: list[float] | None = None,
+        row: dict[str, object] | None = None,
+    ) -> float:
+        if features is None or not candidates or int(action) not in candidates:
+            return 0.0
+        transformed = self._transform_features(features)
+        return self._base.get_action_proba(candidates, action, transformed, row)
 
 class ContextualBanditPlaceholder(BasePolicy):
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
