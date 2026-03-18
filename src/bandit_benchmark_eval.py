@@ -217,11 +217,7 @@ def evaluate_policy(
             used += 1
 
             if online_update and policy.can_update_online:
-                if hasattr(policy, "_sample_weight_from_propensity"):
-                    sample_weight = policy._sample_weight_from_propensity(row.get("propensity", 1.0))
-                    pending_updates.append((action, reward, features, sample_weight))
-                else:
-                    pending_updates.append((action, reward, features))
+                pending_updates.append((action, reward, features))
                 if update_frequency == "step_2p5" and step >= next_step_update_mark and pending_updates:
                     policy.update_batch(pending_updates)
                     pending_updates.clear()
@@ -511,11 +507,7 @@ def evaluate_policy_ips(
             action_stat["cumulative_sensitive_ips_reward"] = float(action_stat["cumulative_sensitive_ips_reward"]) + float(ips_reward)
 
         if online_update and policy.can_update_online:
-            if hasattr(policy, "_sample_weight_from_propensity"):
-                sample_weight = policy._sample_weight_from_propensity(row.get("propensity", 1.0))
-                pending_updates.append((logged_action, logged_reward, features, sample_weight))
-            else:
-                pending_updates.append((logged_action, logged_reward, features))
+            pending_updates.append((logged_action, logged_reward, features))
             if update_frequency == "step_2p5" and step >= next_step_update_mark and pending_updates:
                 policy.update_batch(pending_updates)
                 pending_updates.clear()

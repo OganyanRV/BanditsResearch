@@ -337,9 +337,6 @@ class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
 
 
 CustomSplitCriterion = Literal["bernoulli_log_likelihood", "beta_marginal_likelihood"]
-CustomSampleWeightMode = Literal["unit", "propensity", "inverse_propensity"]
-
-
 @dataclass
 class _CustomTreeNode:
     raw_count: int
@@ -392,7 +389,6 @@ class CustomActionTreeThompsonModel:
         self._next_leaf_id = 0
         self._X_hist = np.empty((0, 0), dtype=float)
         self._y_hist = np.empty((0,), dtype=float)
-        self._w_hist = np.empty((0,), dtype=float)
 
     @staticmethod
     def _resolve_prior(
@@ -427,17 +423,6 @@ class CustomActionTreeThompsonModel:
 
         y = np.asarray(y, dtype=float).reshape(-1)
         return (y > 0).astype(float)
-
-    @staticmethod
-    def _to_weights(sample_weight, n: int):
-        import numpy as np
-
-        if sample_weight is None:
-            return np.ones(n, dtype=float)
-        weights = np.asarray(sample_weight, dtype=float).reshape(-1)
-        if weights.shape[0] != n:
-            raise ValueError("sample_weight must be aligned with y")
-        return weights
 
     def _resolve_min_samples_leaf(self, y) -> int:
         if self.min_samples_leaf is not None:
@@ -504,13 +489,13 @@ class CustomActionTreeThompsonModel:
         self._next_leaf_id += 1
         return node
 
-    def _build_node(self, X, y, w, idx, depth: int) -> _CustomTreeNode | None:
+    def _build_node(self, X, y, idx, depth: int) -> _CustomTreeNode | None:
         import numpy as np
 
         raw_count = int(len(idx))
         raw_clicks = float(y[idx].sum())
-        weighted_count = float(w[idx].sum())
-        weighted_clicks = float((w[idx] * y[idx]).sum())
+        weighted_count = float(raw_count)
+        weighted_clicks = float(raw_clicks)
 
         if raw_count == 0 or raw_clicks < self.c_min:
             return None
@@ -529,11 +514,9 @@ class CustomActionTreeThompsonModel:
             ordered_local = idx[np.argsort(X[idx, feature_idx], kind="mergesort")]
             values = X[ordered_local, feature_idx]
             y_sorted = y[ordered_local]
-            w_sorted = w[ordered_local]
-
             raw_clicks_cum = np.cumsum(y_sorted)
-            weighted_count_cum = np.cumsum(w_sorted)
-            weighted_clicks_cum = np.cumsum(w_sorted * y_sorted)
+            weighted_count_cum = np.cumsum(np.ones_like(y_sorted, dtype=float))
+            weighted_clicks_cum = np.cumsum(y_sorted)
 
             for split_pos in range(self.resolved_min_samples_leaf - 1, raw_count - self.resolved_min_samples_leaf):
                 if values[split_pos] == values[split_pos + 1]:
@@ -577,8 +560,8 @@ class CustomActionTreeThompsonModel:
         if best_feature is None or best_left_idx is None or best_right_idx is None:
             return self._make_leaf(raw_count, raw_clicks, weighted_count, weighted_clicks, depth)
 
-        left_node = self._build_node(X, y, w, best_left_idx, depth + 1)
-        right_node = self._build_node(X, y, w, best_right_idx, depth + 1)
+        left_node = self._build_node(X, y, best_left_idx, depth + 1)
+        right_node = self._build_node(X, y, best_right_idx, depth + 1)
         if left_node is None or right_node is None:
             return self._make_leaf(raw_count, raw_clicks, weighted_count, weighted_clicks, depth)
 
@@ -596,24 +579,22 @@ class CustomActionTreeThompsonModel:
             right=right_node,
         )
 
-    def fit(self, X, y, sample_weight=None):
+    def fit(self, X, y):
         import numpy as np
 
         X = self._to_2d(X)
         y = self._to_1d(y)
-        w = self._to_weights(sample_weight, len(y))
 
         self.resolved_min_samples_leaf = self._resolve_min_samples_leaf(y)
-        self.global_alpha = self.alpha0 + float((w * y).sum())
-        self.global_beta = self.beta0 + float((w * (1.0 - y)).sum())
+        self.global_alpha = self.alpha0 + float(y.sum())
+        self.global_beta = self.beta0 + float(len(y) - y.sum())
         self.leaf_stats = {}
         self._next_leaf_id = 0
         self._X_hist = X.copy()
         self._y_hist = y.copy()
-        self._w_hist = w.copy()
 
         idx = np.arange(len(y), dtype=int)
-        self.tree = self._build_node(X, y, w, idx, depth=0)
+        self.tree = self._build_node(X, y, idx, depth=0)
         return self
 
     def _traverse_row(self, x) -> _CustomTreeNode | None:
@@ -664,48 +645,46 @@ class CustomActionTreeThompsonModel:
             np.broadcast_to(beta, (n_samples, len(beta))),
         )
 
-    def should_rebuild(self, X, y, sample_weight=None) -> bool:
-        del X, y, sample_weight
+    def should_rebuild(self, X, y) -> bool:
+        del X, y
         return False
 
     def rebuild(self) -> None:
         if self._X_hist.size == 0:
             return
-        self.fit(self._X_hist, self._y_hist, sample_weight=self._w_hist)
+        self.fit(self._X_hist, self._y_hist)
 
-    def update_batch(self, X, y, sample_weight=None):
+    def update_batch(self, X, y):
         import numpy as np
 
         self._ensure_fitted()
         X = self._to_2d(X)
         y = self._to_1d(y)
-        w = self._to_weights(sample_weight, len(y))
 
         if self._X_hist.size == 0:
             self._X_hist = X.copy()
         else:
             self._X_hist = np.vstack([self._X_hist, X])
         self._y_hist = np.concatenate([self._y_hist, y])
-        self._w_hist = np.concatenate([self._w_hist, w])
 
-        self.global_alpha = float(self.global_alpha) + float((w * y).sum())
-        self.global_beta = float(self.global_beta) + float((w * (1.0 - y)).sum())
+        self.global_alpha = float(self.global_alpha) + float(y.sum())
+        self.global_beta = float(self.global_beta) + float(len(y) - y.sum())
 
-        if self.should_rebuild(X, y, sample_weight=w):
+        if self.should_rebuild(X, y):
             self.rebuild()
             return
 
         if self.tree is None:
             return
 
-        for row, reward, weight in zip(X, y, w):
+        for row, reward in zip(X, y):
             node = self._traverse_row(row)
             if node is None:
                 continue
             node.raw_count += 1
             node.raw_clicks += float(reward)
-            node.weighted_count += float(weight)
-            node.weighted_clicks += float(weight * reward)
+            node.weighted_count += 1.0
+            node.weighted_clicks += float(reward)
             node.alpha = self.alpha0 + node.weighted_clicks
             node.beta = self.beta0 + max(node.weighted_count - node.weighted_clicks, 0.0)
             if node.leaf_id is not None:
@@ -724,7 +703,6 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
         split_criterion: CustomSplitCriterion = "bernoulli_log_likelihood",
         prior_mean: float | None = None,
         prior_strength: float | None = None,
-        sample_weight_mode: CustomSampleWeightMode = "unit",
         can_update_online: bool | None = True,
     ):
         BasePolicy.__init__(self, can_update_online=can_update_online)
@@ -733,10 +711,9 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
         self.c_min = int(c_min)
         self.random_state = int(random_state)
         self.split_criterion = split_criterion
-        self.sample_weight_mode = sample_weight_mode
         self.alpha0, self.beta0 = CustomActionTreeThompsonModel._resolve_prior(alpha0, beta0, prior_mean, prior_strength)
         self.action_models: dict[int, CustomActionTreeThompsonModel] = {}
-        self.action_history: dict[int, list[tuple[list[float], float, int, float]]] = {}
+        self.action_history: dict[int, list[tuple[list[float], float, int]]] = {}
 
     def _build_model(self) -> CustomActionTreeThompsonModel:
         return CustomActionTreeThompsonModel(
@@ -749,24 +726,11 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
             split_criterion=self.split_criterion,
         )
 
-    def _sample_weight_from_propensity(self, propensity: float | None) -> float:
-        propensity_value = float(propensity or 0.0)
-        if self.sample_weight_mode == "unit":
-            return 1.0
-        if self.sample_weight_mode == "propensity":
-            return propensity_value if propensity_value > 0 else 0.0
-        if self.sample_weight_mode == "inverse_propensity":
-            return (1.0 / propensity_value) if propensity_value > 0 else 0.0
-        raise ValueError(f"Unknown sample_weight_mode: {self.sample_weight_mode}")
-
-    def _parse_update(self, update) -> tuple[int, float, list[float], float]:
-        if len(update) == 3:
-            a, r, f = update
-            return int(a), float(r), [float(v) for v in f], 1.0
-        if len(update) == 4:
-            a, r, f, w = update
-            return int(a), float(r), [float(v) for v in f], float(w)
-        raise ValueError("Updates must be (action, reward, features) or (action, reward, features, sample_weight)")
+    def _parse_update(self, update) -> tuple[int, float, list[float]]:
+        if len(update) != 3:
+            raise ValueError("Updates must be (action, reward, features)")
+        action, reward, features = update
+        return int(action), float(reward), [float(v) for v in features]
 
     def fit(self, train_df: pl.DataFrame) -> None:
         import numpy as np
@@ -779,16 +743,14 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
             action = int(row["show"])
             features = [float(v) for v in row["features_list"]]
             reward = float(row["reward"])
-            sample_weight = self._sample_weight_from_propensity(row.get("propensity", 1.0))
-            self.action_history.setdefault(action, []).append((features, reward, action, sample_weight))
+            self.action_history.setdefault(action, []).append((features, reward, action))
 
         for action, items in self.action_history.items():
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=float)
-            w = np.asarray([it[3] for it in items], dtype=float)
             if len(X) == 0:
                 continue
-            self.action_models[action] = self._build_model().fit(X, y, sample_weight=w)
+            self.action_models[action] = self._build_model().fit(X, y)
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         return TreeThompsonSamplingPolicy.select(self, candidates, features, row)
@@ -808,26 +770,24 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
         if not pending_updates:
             return
 
-        grouped: dict[int, list[tuple[list[float], float, int, float]]] = {}
+        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
         for update in pending_updates:
-            action, reward, features, sample_weight = self._parse_update(update)
-            self.action_history.setdefault(action, []).append((features, reward, action, sample_weight))
-            grouped.setdefault(action, []).append((features, reward, action, sample_weight))
+            action, reward, features = self._parse_update(update)
+            self.action_history.setdefault(action, []).append((features, reward, action))
+            grouped.setdefault(action, []).append((features, reward, action))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=float)
-            w = np.asarray([it[3] for it in items], dtype=float)
             if action in self.action_models and self.action_models[action].tree is not None:
-                self.action_models[action].update_batch(X, y, sample_weight=w)
+                self.action_models[action].update_batch(X, y)
             else:
                 all_items = self.action_history.get(action, items)
                 Xa = np.asarray([it[0] for it in all_items], dtype=float)
                 ya = np.asarray([1 if it[1] > 0 else 0 for it in all_items], dtype=float)
-                wa = np.asarray([it[3] for it in all_items], dtype=float)
                 if len(Xa) == 0:
                     continue
-                self.action_models[action] = self._build_model().fit(Xa, ya, sample_weight=wa)
+                self.action_models[action] = self._build_model().fit(Xa, ya)
 
 
 class CustomTreeThompsonSamplingPolicyUpdateV1(CustomTreeThompsonSamplingPolicy):
@@ -835,7 +795,7 @@ class CustomTreeThompsonSamplingPolicyUpdateV1(CustomTreeThompsonSamplingPolicy)
 
 
 class CustomTreeThompsonSamplingPolicyDummyRefit(CustomTreeThompsonSamplingPolicy):
-    """Custom-tree variant that refits on full weighted history after each update."""
+    """Custom-tree variant that refits on full action history after each update."""
 
     def update_batch(self, pending_updates) -> None:
         import numpy as np
@@ -844,13 +804,12 @@ class CustomTreeThompsonSamplingPolicyDummyRefit(CustomTreeThompsonSamplingPolic
             return
 
         for update in pending_updates:
-            action, reward, features, sample_weight = self._parse_update(update)
-            self.action_history.setdefault(action, []).append((features, reward, action, sample_weight))
+            action, reward, features = self._parse_update(update)
+            self.action_history.setdefault(action, []).append((features, reward, action))
 
         for action, items in self.action_history.items():
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=float)
-            w = np.asarray([it[3] for it in items], dtype=float)
             if len(X) == 0:
                 continue
-            self.action_models[action] = self._build_model().fit(X, y, sample_weight=w)
+            self.action_models[action] = self._build_model().fit(X, y)
