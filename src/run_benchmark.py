@@ -123,7 +123,11 @@ def main() -> None:
         "thompson_sampling": lambda: ThompsonSamplingPolicy(seed=args.seed),
     }
 
-    policy_factories["tree_thompson_sampling_refit"] = lambda: TreeThompsonSamplingPolicyDummyRefit(random_state=args.seed)
+    try:
+        import sklearn  # noqa: F401
+        policy_factories["tree_thompson_sampling_refit"] = lambda: TreeThompsonSamplingPolicyDummyRefit(random_state=args.seed)
+    except Exception:
+        print("sklearn is unavailable: skipping TreeThompsonSamplingPolicy")
 
     try:
         import scipy  # noqa: F401
