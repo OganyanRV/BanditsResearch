@@ -506,7 +506,7 @@ class CustomActionTreeThompsonModel:
             return None
 
         parent_score = self._score(clicks, count - clicks)
-        if depth >= self.max_depth or count < 2 * self.resolved_min_samples_leaf or clicks < 2 * self.c_min:
+        if depth >= self.max_depth:
             return self._make_leaf(count, clicks, depth)
 
         best_gain = 0.0

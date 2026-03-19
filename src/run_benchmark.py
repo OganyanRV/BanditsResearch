@@ -178,7 +178,7 @@ def main() -> None:
     history_df = result["history"]
     action_stats_df = result["action_stats"]
     action_daily_stats_df = result["action_daily_stats"]
-    action_sensitive_stats_df = result["action_sensitive_stats"]
+    action_ips_stats_df = result["action_ips_stats"]
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -186,18 +186,18 @@ def main() -> None:
     history_path = out_dir / "history.csv"
     action_stats_path = out_dir / "action_stats.csv"
     action_daily_stats_path = out_dir / "action_daily_stats.csv"
-    action_sensitive_stats_path = out_dir / "action_sensitive_stats.csv"
+    action_ips_stats_path = out_dir / "action_ips_stats.csv"
     metrics_df.to_csv(metrics_path, index=False)
     history_df.to_csv(history_path, index=False)
     action_stats_df.to_csv(action_stats_path, index=False)
     action_daily_stats_df.to_csv(action_daily_stats_path, index=False)
-    action_sensitive_stats_df.to_csv(action_sensitive_stats_path, index=False)
+    action_ips_stats_df.to_csv(action_ips_stats_path, index=False)
 
     print(f"saved metrics: {metrics_path}")
     print(f"saved history: {history_path}")
     print(f"saved action stats: {action_stats_path}")
     print(f"saved action daily stats: {action_daily_stats_path}")
-    print(f"saved action sensitive stats: {action_sensitive_stats_path}")
+    print(f"saved action IPS stats: {action_ips_stats_path}")
     print(metrics_df)
 
     main_cols = ["scenario", "algo", "ips_ctr", "snips_ctr"]
@@ -205,18 +205,13 @@ def main() -> None:
         print("IPS/SNIPS metrics:")
         print(metrics_df[main_cols].sort_values(["scenario", "algo"]).to_string(index=False))
 
-    sensitive_cols = ["scenario", "algo", "sensitive_impressions", "ips_ctr_sensitive", "ips_regret_sens"]
-    if set(sensitive_cols).issubset(metrics_df.columns):
-        print("sensitive IPS metrics (rows with len(candidates) > 1):")
-        print(metrics_df[sensitive_cols].sort_values(["scenario", "algo"]).to_string(index=False))
-
     if args.simulate:
         print("action stats (date-change checkpoints):")
         print(action_stats_df)
         print("action daily stats (impressions by action/day):")
         print(action_daily_stats_df)
-        print("action sensitive stats:")
-        print(action_sensitive_stats_df)
+        print("action IPS stats:")
+        print(action_ips_stats_df)
 
     plot_paths = save_plots(history_df, str(out_dir / "plots"))
     if plot_paths:
