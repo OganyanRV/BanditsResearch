@@ -339,10 +339,8 @@ class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
 CustomSplitCriterion = Literal["bernoulli_log_likelihood", "beta_marginal_likelihood"]
 @dataclass
 class _CustomTreeNode:
-    raw_count: int
-    raw_clicks: float
-    weighted_count: float
-    weighted_clicks: float
+    count: int
+    clicks: float
     alpha: float
     beta: float
     depth: int
@@ -355,6 +353,17 @@ class _CustomTreeNode:
     @property
     def is_leaf(self) -> bool:
         return self.left is None and self.right is None
+
+    @property
+    def mean_score_class_1(self) -> float:
+        denom = self.alpha + self.beta
+        if denom <= 0:
+            return 0.5
+        return self.alpha / denom
+
+    @property
+    def mean_score_class_0(self) -> float:
+        return 1.0 - self.mean_score_class_1
 
 
 class CustomActionTreeThompsonModel:
@@ -435,53 +444,51 @@ class CustomActionTreeThompsonModel:
 
     def _leaf_dict(self, node: _CustomTreeNode) -> dict[str, float | int]:
         return {
-            "n": int(node.raw_count),
-            "clicks": float(node.raw_clicks),
-            "weighted_n": float(node.weighted_count),
-            "weighted_clicks": float(node.weighted_clicks),
+            "n": int(node.count),
+            "clicks": float(node.clicks),
             "alpha": float(node.alpha),
             "beta": float(node.beta),
+            "mean_score_class_0": float(node.mean_score_class_0),
+            "mean_score_class_1": float(node.mean_score_class_1),
         }
 
-    def _bernoulli_log_likelihood(self, weighted_clicks: float, weighted_fails: float) -> float:
-        total = weighted_clicks + weighted_fails
+    def _bernoulli_log_likelihood(self, clicks: float, fails: float) -> float:
+        total = clicks + fails
         if total <= 0:
             return float("-inf")
-        p = weighted_clicks / total
+        p = clicks / total
         out = 0.0
-        if weighted_clicks > 0 and p > 0:
-            out += weighted_clicks * math.log(p)
-        if weighted_fails > 0 and p < 1:
-            out += weighted_fails * math.log(1.0 - p)
+        if clicks > 0 and p > 0:
+            out += clicks * math.log(p)
+        if fails > 0 and p < 1:
+            out += fails * math.log(1.0 - p)
         return out
 
-    def _beta_marginal_log_likelihood(self, weighted_clicks: float, weighted_fails: float) -> float:
+    def _beta_marginal_log_likelihood(self, clicks: float, fails: float) -> float:
         a = self.alpha0
         b = self.beta0
         return (
-            math.lgamma(a + weighted_clicks)
-            + math.lgamma(b + weighted_fails)
-            - math.lgamma(a + b + weighted_clicks + weighted_fails)
+            math.lgamma(a + clicks)
+            + math.lgamma(b + fails)
+            - math.lgamma(a + b + clicks + fails)
             - math.lgamma(a)
             - math.lgamma(b)
             + math.lgamma(a + b)
         )
 
-    def _score(self, weighted_clicks: float, weighted_fails: float) -> float:
+    def _score(self, clicks: float, fails: float) -> float:
         if self.split_criterion == "bernoulli_log_likelihood":
-            return self._bernoulli_log_likelihood(weighted_clicks, weighted_fails)
+            return self._bernoulli_log_likelihood(clicks, fails)
         if self.split_criterion == "beta_marginal_likelihood":
-            return self._beta_marginal_log_likelihood(weighted_clicks, weighted_fails)
+            return self._beta_marginal_log_likelihood(clicks, fails)
         raise ValueError(f"Unknown split_criterion: {self.split_criterion}")
 
-    def _make_leaf(self, raw_count: int, raw_clicks: float, weighted_count: float, weighted_clicks: float, depth: int) -> _CustomTreeNode:
+    def _make_leaf(self, count: int, clicks: float, depth: int) -> _CustomTreeNode:
         node = _CustomTreeNode(
-            raw_count=int(raw_count),
-            raw_clicks=float(raw_clicks),
-            weighted_count=float(weighted_count),
-            weighted_clicks=float(weighted_clicks),
-            alpha=self.alpha0 + float(weighted_clicks),
-            beta=self.beta0 + float(max(weighted_count - weighted_clicks, 0.0)),
+            count=int(count),
+            clicks=float(clicks),
+            alpha=self.alpha0 + float(clicks),
+            beta=self.beta0 + float(max(count - clicks, 0.0)),
             depth=int(depth),
             leaf_id=self._next_leaf_id,
         )
@@ -492,17 +499,15 @@ class CustomActionTreeThompsonModel:
     def _build_node(self, X, y, idx, depth: int) -> _CustomTreeNode | None:
         import numpy as np
 
-        raw_count = int(len(idx))
-        raw_clicks = float(y[idx].sum())
-        weighted_count = float(raw_count)
-        weighted_clicks = float(raw_clicks)
+        count = int(len(idx))
+        clicks = float(y[idx].sum())
 
-        if raw_count == 0 or raw_clicks < self.c_min:
+        if count == 0 or clicks < self.c_min:
             return None
 
-        parent_score = self._score(weighted_clicks, weighted_count - weighted_clicks)
-        if depth >= self.max_depth or raw_count < 2 * self.resolved_min_samples_leaf or raw_clicks < 2 * self.c_min:
-            return self._make_leaf(raw_count, raw_clicks, weighted_count, weighted_clicks, depth)
+        parent_score = self._score(clicks, count - clicks)
+        if depth >= self.max_depth or count < 2 * self.resolved_min_samples_leaf or clicks < 2 * self.c_min:
+            return self._make_leaf(count, clicks, depth)
 
         best_gain = 0.0
         best_feature: int | None = None
@@ -514,31 +519,30 @@ class CustomActionTreeThompsonModel:
             ordered_local = idx[np.argsort(X[idx, feature_idx], kind="mergesort")]
             values = X[ordered_local, feature_idx]
             y_sorted = y[ordered_local]
-            raw_clicks_cum = np.cumsum(y_sorted)
-            weighted_count_cum = np.cumsum(np.ones_like(y_sorted, dtype=float))
-            weighted_clicks_cum = np.cumsum(y_sorted)
+            clicks_cum = np.cumsum(y_sorted)
+            count_cum = np.cumsum(np.ones_like(y_sorted, dtype=float))
 
-            for split_pos in range(self.resolved_min_samples_leaf - 1, raw_count - self.resolved_min_samples_leaf):
+            for split_pos in range(self.resolved_min_samples_leaf - 1, count - self.resolved_min_samples_leaf):
                 if values[split_pos] == values[split_pos + 1]:
                     continue
 
                 left_raw_count = split_pos + 1
-                right_raw_count = raw_count - left_raw_count
-                left_raw_clicks = float(raw_clicks_cum[split_pos])
-                right_raw_clicks = raw_clicks - left_raw_clicks
+                right_raw_count = count - left_raw_count
+                left_raw_clicks = float(clicks_cum[split_pos])
+                right_raw_clicks = clicks - left_raw_clicks
                 if left_raw_count < self.resolved_min_samples_leaf or right_raw_count < self.resolved_min_samples_leaf:
                     continue
                 if left_raw_clicks < self.c_min or right_raw_clicks < self.c_min:
                     continue
 
-                left_weighted_count = float(weighted_count_cum[split_pos])
-                left_weighted_clicks = float(weighted_clicks_cum[split_pos])
-                right_weighted_count = weighted_count - left_weighted_count
-                right_weighted_clicks = weighted_clicks - left_weighted_clicks
+                left_count = float(count_cum[split_pos])
+                left_clicks = float(clicks_cum[split_pos])
+                right_count = float(count) - left_count
+                right_clicks = clicks - left_clicks
 
-                split_score = self._score(left_weighted_clicks, left_weighted_count - left_weighted_clicks) + self._score(
-                    right_weighted_clicks,
-                    right_weighted_count - right_weighted_clicks,
+                split_score = self._score(left_clicks, left_count - left_clicks) + self._score(
+                    right_clicks,
+                    right_count - right_clicks,
                 )
                 gain = split_score - parent_score
                 if gain <= best_gain:
@@ -558,20 +562,18 @@ class CustomActionTreeThompsonModel:
                 best_right_idx = right_idx
 
         if best_feature is None or best_left_idx is None or best_right_idx is None:
-            return self._make_leaf(raw_count, raw_clicks, weighted_count, weighted_clicks, depth)
+            return self._make_leaf(count, clicks, depth)
 
         left_node = self._build_node(X, y, best_left_idx, depth + 1)
         right_node = self._build_node(X, y, best_right_idx, depth + 1)
         if left_node is None or right_node is None:
-            return self._make_leaf(raw_count, raw_clicks, weighted_count, weighted_clicks, depth)
+            return self._make_leaf(count, clicks, depth)
 
         return _CustomTreeNode(
-            raw_count=raw_count,
-            raw_clicks=raw_clicks,
-            weighted_count=weighted_count,
-            weighted_clicks=weighted_clicks,
-            alpha=self.alpha0 + weighted_clicks,
-            beta=self.beta0 + max(weighted_count - weighted_clicks, 0.0),
+            count=count,
+            clicks=clicks,
+            alpha=self.alpha0 + clicks,
+            beta=self.beta0 + max(count - clicks, 0.0),
             depth=depth,
             feature_index=best_feature,
             threshold=best_threshold,
@@ -619,10 +621,10 @@ class CustomActionTreeThompsonModel:
                     {
                         "n": 0,
                         "clicks": 0.0,
-                        "weighted_n": 0.0,
-                        "weighted_clicks": 0.0,
                         "alpha": self.global_alpha,
                         "beta": self.global_beta,
+                        "mean_score_class_0": float(self.global_beta / (self.global_alpha + self.global_beta)),
+                        "mean_score_class_1": float(self.global_alpha / (self.global_alpha + self.global_beta)),
                         "used_global_fallback": True,
                     }
                 )
@@ -681,14 +683,44 @@ class CustomActionTreeThompsonModel:
             node = self._traverse_row(row)
             if node is None:
                 continue
-            node.raw_count += 1
-            node.raw_clicks += float(reward)
-            node.weighted_count += 1.0
-            node.weighted_clicks += float(reward)
-            node.alpha = self.alpha0 + node.weighted_clicks
-            node.beta = self.beta0 + max(node.weighted_count - node.weighted_clicks, 0.0)
+            node.count += 1
+            node.clicks += float(reward)
+            node.alpha = self.alpha0 + node.clicks
+            node.beta = self.beta0 + max(node.count - node.clicks, 0.0)
             if node.leaf_id is not None:
                 self.leaf_stats[node.leaf_id] = self._leaf_dict(node)
+
+    def visualize_tree(self) -> str:
+        return render_custom_tree_text(self)
+
+
+def _format_custom_tree_node(node: _CustomTreeNode, indent: str = "") -> list[str]:
+    mean0 = node.mean_score_class_0
+    mean1 = node.mean_score_class_1
+    summary = (
+        f"n={node.count}, clicks={node.clicks:.3f}, alpha={node.alpha:.3f}, beta={node.beta:.3f}, "
+        f"mean_p0={mean0:.3f}, mean_p1={mean1:.3f}"
+    )
+    if node.is_leaf:
+        leaf_label = f"leaf_id={node.leaf_id}" if node.leaf_id is not None else "leaf"
+        return [f"{indent}{leaf_label}: {summary}"]
+
+    split = f"x[{node.feature_index}] <= {node.threshold:.6f}"
+    lines = [f"{indent}{split}: {summary}"]
+    if node.left is not None:
+        lines.append(f"{indent}├─ yes")
+        lines.extend(_format_custom_tree_node(node.left, indent + "│  "))
+    if node.right is not None:
+        lines.append(f"{indent}└─ no")
+        lines.extend(_format_custom_tree_node(node.right, indent + "   "))
+    return lines
+
+
+def render_custom_tree_text(model: CustomActionTreeThompsonModel) -> str:
+    model._ensure_fitted()
+    if model.tree is None:
+        return "<empty custom tree>"
+    return "\n".join(_format_custom_tree_node(model.tree))
 
 
 class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):

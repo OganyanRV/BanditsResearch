@@ -55,6 +55,7 @@ from bandit_benchmark_tree import (
     TreeThompsonSamplingPolicy,
     TreeThompsonSamplingPolicyDummyRefit,
     TreeThompsonSamplingPolicyUpdateV1,
+    render_custom_tree_text,
 )
 
 TreeThompsonSamplingPolicyV1 = TreeThompsonSamplingPolicyUpdateV1
