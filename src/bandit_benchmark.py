@@ -53,14 +53,16 @@ from bandit_benchmark_tree import (
     CatBoostTreeThompsonSamplingPolicy,
     CatBoostTreeThompsonSamplingPolicyDummyRefit,
     CatBoostTreeThompsonSamplingPolicyUpdateV1,
-    CustomActionTreeThompsonModel,
-    CustomTreeThompsonSamplingPolicy,
-    CustomTreeThompsonSamplingPolicyDummyRefit,
-    CustomTreeThompsonSamplingPolicyUpdateV1,
     TreeThompsonSamplingPolicy,
     TreeThompsonSamplingPolicyDummyRefit,
     TreeThompsonSamplingPolicyUpdateV1,
     TreeThompsonSamplingPolicyUpdateV2,
+)
+from bandit_benchmark_custom_tree import (
+    CustomActionTreeThompsonModel,
+    CustomTreeThompsonSamplingPolicy,
+    CustomTreeThompsonSamplingPolicyDummyRefit,
+    CustomTreeThompsonSamplingPolicyUpdateV1,
     render_custom_tree_text,
 )
 
