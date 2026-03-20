@@ -60,6 +60,7 @@ from bandit_benchmark_tree import (
     TreeThompsonSamplingPolicy,
     TreeThompsonSamplingPolicyDummyRefit,
     TreeThompsonSamplingPolicyUpdateV1,
+    TreeThompsonSamplingPolicyUpdateV2,
     render_custom_tree_text,
 )
 

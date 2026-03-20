@@ -17,7 +17,7 @@ class ActionTreeThompsonModel:
     def __init__(
         self,
         max_depth: int = 4,
-        min_samples_leaf: int = 300,
+        min_samples_leaf: int | None = None,
         alpha0: float = 1.0,
         beta0: float = 1.0,
         c_min: int = 5,
@@ -36,6 +36,7 @@ class ActionTreeThompsonModel:
         self.leaf_stats: dict[int, dict[str, float | int]] = {}
         self.global_alpha: float | None = None
         self.global_beta: float | None = None
+        self.is_tree_trained = False
         self._rng = np.random.default_rng(self.random_state)
 
     def fit(self, X, y):
@@ -54,6 +55,7 @@ class ActionTreeThompsonModel:
         self.tree.fit(X, y)
 
         leaf_ids = self.tree.apply(X)
+        self.is_tree_trained = bool(len(np.unique(leaf_ids)) >= 2)
         total_clicks = int(y.sum())
         total_n = int(len(y))
         self.global_alpha = self.alpha0 + total_clicks
@@ -181,7 +183,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
     ):
         super().__init__(can_update_online=can_update_online)
         self.max_depth = int(max_depth)
-        self.min_samples_leaf = int(min_samples_leaf)
+        self.min_samples_leaf = None if min_samples_leaf is None else int(min_samples_leaf)
         self.alpha0 = float(alpha0)
         self.beta0 = float(beta0)
         self.c_min = int(c_min)
@@ -190,10 +192,19 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         self.action_models: dict[int, ActionTreeThompsonModel] = {}
         self.action_history: dict[int, list[tuple[list[float], float, int]]] = {}
 
-    def _build_model(self) -> ActionTreeThompsonModel:
+    def _resolve_min_samples_leaf(self, y) -> int:
+        if self.min_samples_leaf is not None:
+            return max(1, int(self.min_samples_leaf))
+        if self.c_min <= 0:
+            return 1
+        ctr = float(y.mean()) if len(y) else 0.0
+        ctr = max(ctr, 1e-6)
+        return max(1, int(math.ceil(self.c_min / ctr)))
+
+    def _build_model(self, resolved_min_samples_leaf: int) -> ActionTreeThompsonModel:
         return ActionTreeThompsonModel(
             max_depth=self.max_depth,
-            min_samples_leaf=self.min_samples_leaf,
+            min_samples_leaf=resolved_min_samples_leaf,
             alpha0=self.alpha0,
             beta0=self.beta0,
             c_min=self.c_min,
@@ -218,7 +229,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
             if len(X) == 0:
                 continue
-            self.action_models[action] = self._build_model().fit(X, y)
+            self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(y)).fit(X, y)
 
     def select(self, candidates: list[Action], features: list[float], row: dict[str, object]) -> Action:
         import numpy as np
@@ -235,7 +246,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         for candidate in candidates:
             action = int(candidate)
             model = self.action_models.get(action)
-            if model is None or model.tree is None:
+            if model is None or model.tree is None or not model.is_tree_trained:
                 score = float(rng.beta(self.alpha0, self.beta0))
             else:
                 score = float(model.sample_proba(x, n_samples=1)[0])
@@ -269,7 +280,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             for candidate in candidates:
                 aa = int(candidate)
                 model = self.action_models.get(aa)
-                if model is None or model.tree is None:
+                if model is None or model.tree is None or not model.is_tree_trained:
                     score = float(rng.beta(self.alpha0, self.beta0))
                 else:
                     score = float(model.sample_proba(x, n_samples=1)[0])
@@ -298,7 +309,11 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
-            if action in self.action_models and self.action_models[action].tree is not None:
+            if (
+                action in self.action_models
+                and self.action_models[action].tree is not None
+                and self.action_models[action].is_tree_trained
+            ):
                 self.action_models[action].update_batch(X, y)
             else:
                 all_items = self.action_history.get(action, items)
@@ -306,11 +321,47 @@ class TreeThompsonSamplingPolicy(BasePolicy):
                 ya = np.asarray([1 if it[1] > 0 else 0 for it in all_items], dtype=int)
                 if len(Xa) == 0:
                     continue
-                self.action_models[action] = self._build_model().fit(Xa, ya)
+                self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(ya)).fit(Xa, ya)
 
 
 class TreeThompsonSamplingPolicyUpdateV1(TreeThompsonSamplingPolicy):
     """Incremental sklearn-tree updates via ActionTreeThompsonModel.update_batch."""
+
+
+class TreeThompsonSamplingPolicyUpdateV2(TreeThompsonSamplingPolicy):
+    """Incremental sklearn-tree updates that retry fitting until the action-tree becomes split/trained."""
+
+    def update_batch(self, pending_updates) -> None:
+        import numpy as np
+
+        if not pending_updates:
+            return
+
+        for action, reward, features in pending_updates:
+            aa = int(action)
+            ff = [float(v) for v in features]
+            rr = float(reward)
+            self.action_history.setdefault(aa, []).append((ff, rr, aa))
+
+        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        for action, reward, features in pending_updates:
+            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+
+        for action, items in grouped.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+            model = self.action_models.get(action)
+
+            if model is not None and model.tree is not None and model.is_tree_trained:
+                model.update_batch(X, y)
+                continue
+
+            all_items = self.action_history.get(action, items)
+            Xa = np.asarray([it[0] for it in all_items], dtype=float)
+            ya = np.asarray([1 if it[1] > 0 else 0 for it in all_items], dtype=int)
+            if len(Xa) == 0:
+                continue
+            self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(ya)).fit(Xa, ya)
 
 
 class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
@@ -333,7 +384,7 @@ class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
             if len(X) == 0:
                 continue
-            self.action_models[action] = self._build_model().fit(X, y)
+            self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(y)).fit(X, y)
 
 
 class ActionCatBoostTreeThompsonModel:
