@@ -34,6 +34,7 @@ from bandit_benchmark_eval import (
 )
 from bandit_benchmark_external import (
     CatBoostPolicy,
+    CatBoostOneTreePolicy,
     ContextualBanditPlaceholder,
     LogisticTSLibPolicy,
     LogisticTSPolicy,

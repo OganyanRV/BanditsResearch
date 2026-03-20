@@ -240,9 +240,19 @@ class CatBoostPolicy(BasePolicy):
 
     can_update_online = False
 
-    def __init__(self, random_seed: int = 42, can_update_online: bool | None = None):
+    def __init__(
+        self,
+        random_seed: int = 42,
+        iterations: int = 200,
+        depth: int = 6,
+        learning_rate: float = 0.05,
+        can_update_online: bool | None = None,
+    ):
         super().__init__(can_update_online=can_update_online)
         self.random_seed = random_seed
+        self.iterations = int(iterations)
+        self.depth = int(depth)
+        self.learning_rate = float(learning_rate)
         self._model = None
         self._fitted = False
         self._actions: list[int] = []
@@ -285,9 +295,9 @@ class CatBoostPolicy(BasePolicy):
             return
 
         model = CatBoostClassifier(
-            iterations=200,
-            depth=6,
-            learning_rate=0.05,
+            iterations=self.iterations,
+            depth=self.depth,
+            learning_rate=self.learning_rate,
             loss_function="Logloss",
             verbose=False,
             random_seed=self.random_seed,
@@ -335,6 +345,25 @@ class CatBoostPolicy(BasePolicy):
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
         return
+
+
+class CatBoostOneTreePolicy(CatBoostPolicy):
+    """CatBoost-based policy constrained to a single boosting iteration/tree."""
+
+    def __init__(
+        self,
+        random_seed: int = 42,
+        depth: int = 6,
+        learning_rate: float = 0.05,
+        can_update_online: bool | None = None,
+    ):
+        super().__init__(
+            random_seed=random_seed,
+            iterations=1,
+            depth=depth,
+            learning_rate=learning_rate,
+            can_update_online=can_update_online,
+        )
 
 # Backward-compatible aliases
 LogisticTSPolicy = LogisticTSLibPolicy

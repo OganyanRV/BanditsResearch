@@ -11,6 +11,7 @@ import polars as pl
 from prepare_datasets import preprocess_bandit_dataframe, split_train_test_by_date
 from bandit_benchmark import (
     CatBoostPolicy,
+    CatBoostOneTreePolicy,
     EpsilonGreedyPolicy,
     LogisticTSLibPolicy,
     LaplaceThompsonViaBayesianLogRegPolicy,
@@ -148,6 +149,7 @@ def main() -> None:
     try:
         import catboost  # noqa: F401
         policy_factories["catboost"] = lambda: CatBoostPolicy(random_seed=args.seed)
+        policy_factories["catboost_one_tree"] = lambda: CatBoostOneTreePolicy(random_seed=args.seed)
     except Exception:
         print("catboost is unavailable: skipping CatBoostPolicy")
 
