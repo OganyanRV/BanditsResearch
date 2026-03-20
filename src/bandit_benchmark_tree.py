@@ -307,11 +307,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
-            if (
-                action in self.action_models
-                and self.action_models[action].tree is not None
-                and self.action_models[action].is_tree_trained
-            ):
+            if action in self.action_models and self.action_models[action].tree is not None:
                 self.action_models[action].update_batch(X, y)
             else:
                 all_items = self.action_history.get(action, items)
@@ -352,6 +348,41 @@ class TreeThompsonSamplingPolicyUpdateV2(TreeThompsonSamplingPolicy):
 
             if model is not None and model.tree is not None and model.is_tree_trained:
                 model.update_batch(X, y)
+                continue
+
+            all_items = self.action_history.get(action, items)
+            Xa = np.asarray([it[0] for it in all_items], dtype=float)
+            ya = np.asarray([1 if it[1] > 0 else 0 for it in all_items], dtype=int)
+            if len(Xa) == 0:
+                continue
+            self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(ya)).fit(Xa, ya)
+
+
+class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
+    """Incremental sklearn-tree updates that only require an existing fitted tree."""
+
+    def update_batch(self, pending_updates) -> None:
+        import numpy as np
+
+        if not pending_updates:
+            return
+
+        for action, reward, features in pending_updates:
+            aa = int(action)
+            ff = [float(v) for v in features]
+            rr = float(reward)
+            self.action_history.setdefault(aa, []).append((ff, rr, aa))
+
+        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        for action, reward, features in pending_updates:
+            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+
+        for action, items in grouped.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+
+            if action in self.action_models and self.action_models[action].tree is not None:
+                self.action_models[action].update_batch(X, y)
                 continue
 
             all_items = self.action_history.get(action, items)

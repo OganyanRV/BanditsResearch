@@ -52,6 +52,7 @@ from bandit_benchmark_tree import (
     TreeThompsonSamplingPolicyDummyRefit,
     TreeThompsonSamplingPolicyUpdateV1,
     TreeThompsonSamplingPolicyUpdateV2,
+    TreeThompsonSamplingPolicyUpdateV3,
 )
 from bandit_benchmark_custom_tree import (
     CustomActionTreeThompsonModel,
