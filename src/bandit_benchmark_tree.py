@@ -19,6 +19,7 @@ class ActionTreeThompsonModel:
         alpha0: float = 1.0,
         beta0: float = 1.0,
         c_min: int = 5,
+        use_c_min_fallback: bool = True,
         random_state: int = 42,
     ):
         import numpy as np
@@ -28,6 +29,7 @@ class ActionTreeThompsonModel:
         self.alpha0 = float(alpha0)
         self.beta0 = float(beta0)
         self.c_min = int(c_min)
+        self.use_c_min_fallback = bool(use_c_min_fallback)
         self.random_state = int(random_state)
 
         self.tree = None
@@ -100,17 +102,15 @@ class ActionTreeThompsonModel:
                 "alpha": self.global_alpha,
                 "beta": self.global_beta,
                 "used_global_fallback": True,
-                "used_c_min_fallback": False,
             }
 
-        if int(stats["clicks"]) < self.c_min:
+        if self.use_c_min_fallback and int(stats["clicks"]) < self.c_min:
             return {
                 "n": stats["n"],
                 "clicks": stats["clicks"],
                 "alpha": self.global_alpha,
                 "beta": self.global_beta,
                 "used_global_fallback": True,
-                "used_c_min_fallback": True,
             }
 
         return {
@@ -119,7 +119,6 @@ class ActionTreeThompsonModel:
             "alpha": stats["alpha"],
             "beta": stats["beta"],
             "used_global_fallback": False,
-            "used_c_min_fallback": False,
         }
 
     def get_leaf_stats(self, X):
@@ -179,6 +178,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         alpha0: float = 1.0,
         beta0: float = 1.0,
         c_min: int = 5,
+        use_c_min_fallback: bool = True,
         random_state: int = 42,
         can_update_online: bool | None = True,
     ):
@@ -188,6 +188,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         self.alpha0 = float(alpha0)
         self.beta0 = float(beta0)
         self.c_min = int(c_min)
+        self.use_c_min_fallback = bool(use_c_min_fallback)
         self.random_state = int(random_state)
 
         self.action_models: dict[int, ActionTreeThompsonModel] = {}
@@ -209,6 +210,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             alpha0=self.alpha0,
             beta0=self.beta0,
             c_min=self.c_min,
+            use_c_min_fallback=self.use_c_min_fallback,
             random_state=self.random_state,
         )
 
