@@ -100,6 +100,7 @@ class ActionTreeThompsonModel:
                 "alpha": self.global_alpha,
                 "beta": self.global_beta,
                 "used_global_fallback": True,
+                "used_c_min_fallback": False,
             }
 
         if int(stats["clicks"]) < self.c_min:
@@ -109,6 +110,7 @@ class ActionTreeThompsonModel:
                 "alpha": self.global_alpha,
                 "beta": self.global_beta,
                 "used_global_fallback": True,
+                "used_c_min_fallback": True,
             }
 
         return {
@@ -117,6 +119,7 @@ class ActionTreeThompsonModel:
             "alpha": stats["alpha"],
             "beta": stats["beta"],
             "used_global_fallback": False,
+            "used_c_min_fallback": False,
         }
 
     def get_leaf_stats(self, X):
