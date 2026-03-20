@@ -364,7 +364,23 @@ class TreeThompsonSamplingPolicyUpdateV2(TreeThompsonSamplingPolicy):
 
 
 class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
-    """Incremental sklearn-tree updates that only require an existing fitted tree."""
+    """Incremental sklearn-tree updates with full refits every N update_batch calls."""
+
+    def __init__(self, *args, retrain_every_n_updates: int = 10, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retrain_every_n_updates = max(1, int(retrain_every_n_updates))
+        self._update_batch_calls = 0
+
+    def _refit_all_models(self) -> None:
+        import numpy as np
+
+        self.action_models = {}
+        for action, items in self.action_history.items():
+            X = np.asarray([it[0] for it in items], dtype=float)
+            y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
+            if len(X) == 0:
+                continue
+            self.action_models[action] = self._build_model(self._resolve_min_samples_leaf(y)).fit(X, y)
 
     def update_batch(self, pending_updates) -> None:
         import numpy as np
@@ -377,6 +393,11 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
+
+        self._update_batch_calls += 1
+        if self._update_batch_calls % self.retrain_every_n_updates == 0:
+            self._refit_all_models()
+            return
 
         grouped: dict[int, list[tuple[list[float], float, int]]] = {}
         for action, reward, features in pending_updates:
