@@ -34,7 +34,6 @@ from bandit_benchmark_eval import (
 )
 from bandit_benchmark_external import (
     CatBoostPolicy,
-    CatBoostOneTreePolicy,
     ContextualBanditPlaceholder,
     LogisticTSLibPolicy,
     LogisticTSPolicy,
@@ -49,10 +48,6 @@ from bandit_benchmark_linear import (
 )
 from bandit_benchmark_tree import (
     ActionTreeThompsonModel,
-    ActionCatBoostTreeThompsonModel,
-    CatBoostTreeThompsonSamplingPolicy,
-    CatBoostTreeThompsonSamplingPolicyDummyRefit,
-    CatBoostTreeThompsonSamplingPolicyUpdateV1,
     TreeThompsonSamplingPolicy,
     TreeThompsonSamplingPolicyDummyRefit,
     TreeThompsonSamplingPolicyUpdateV1,

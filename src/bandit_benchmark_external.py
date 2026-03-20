@@ -347,24 +347,6 @@ class CatBoostPolicy(BasePolicy):
         return
 
 
-class CatBoostOneTreePolicy(CatBoostPolicy):
-    """CatBoost-based policy constrained to a single boosting iteration/tree."""
-
-    def __init__(
-        self,
-        random_seed: int = 42,
-        depth: int = 6,
-        learning_rate: float = 0.05,
-        can_update_online: bool | None = None,
-    ):
-        super().__init__(
-            random_seed=random_seed,
-            iterations=1,
-            depth=depth,
-            learning_rate=learning_rate,
-            can_update_online=can_update_online,
-        )
-
 # Backward-compatible aliases
 LogisticTSPolicy = LogisticTSLibPolicy
 PartitionedTSPolicy = PartitionedTSLibPolicy
