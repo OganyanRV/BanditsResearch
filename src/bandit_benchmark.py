@@ -49,6 +49,10 @@ from bandit_benchmark_linear import (
 )
 from bandit_benchmark_tree import (
     ActionTreeThompsonModel,
+    ActionCatBoostTreeThompsonModel,
+    CatBoostTreeThompsonSamplingPolicy,
+    CatBoostTreeThompsonSamplingPolicyDummyRefit,
+    CatBoostTreeThompsonSamplingPolicyUpdateV1,
     CustomActionTreeThompsonModel,
     CustomTreeThompsonSamplingPolicy,
     CustomTreeThompsonSamplingPolicyDummyRefit,

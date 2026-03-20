@@ -12,6 +12,7 @@ from prepare_datasets import preprocess_bandit_dataframe, split_train_test_by_da
 from bandit_benchmark import (
     CatBoostPolicy,
     CatBoostOneTreePolicy,
+    CatBoostTreeThompsonSamplingPolicyUpdateV1,
     EpsilonGreedyPolicy,
     LogisticTSLibPolicy,
     LaplaceThompsonViaBayesianLogRegPolicy,
@@ -150,6 +151,9 @@ def main() -> None:
         import catboost  # noqa: F401
         policy_factories["catboost"] = lambda: CatBoostPolicy(random_seed=args.seed)
         policy_factories["catboost_one_tree"] = lambda: CatBoostOneTreePolicy(random_seed=args.seed)
+        policy_factories["catboost_tree_thompson_sampling_update_v1"] = (
+            lambda: CatBoostTreeThompsonSamplingPolicyUpdateV1(random_state=args.seed)
+        )
     except Exception:
         print("catboost is unavailable: skipping CatBoostPolicy")
 
