@@ -407,8 +407,10 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             X = np.asarray([it[0] for it in items], dtype=float)
             y = np.asarray([1 if it[1] > 0 else 0 for it in items], dtype=int)
 
-            if action in self.action_models and self.action_models[action].tree is not None:
-                self.action_models[action].update_batch(X, y)
+            model = self.action_models.get(action)
+
+            if model is not None and model.tree is not None and model.is_tree_trained:
+                model.update_batch(X, y)
                 continue
 
             all_items = self.action_history.get(action, items)
