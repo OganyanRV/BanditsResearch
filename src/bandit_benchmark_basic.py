@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from numbers import Integral
 import random
 from typing import Literal
 
 import polars as pl
 
-Action = int
+Action = str
+
+
+def normalize_action(value: object) -> Action:
+    """Normalize action ids so datasets can contain ints or strings."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Integral):
+        return str(int(value))
+    return str(value)
 
 
 @dataclass
@@ -39,7 +49,7 @@ class BasePolicy:
         if not (len(candidates_batch) == len(features_batch) == len(rows_batch)):
             raise ValueError("Batch inputs must have equal length")
         return [
-            int(self.select(candidates, features, row))
+            normalize_action(self.select(candidates, features, row))
             for candidates, features, row in zip(candidates_batch, features_batch, rows_batch)
         ]
 
@@ -50,22 +60,23 @@ class BasePolicy:
         features: list[float] | None = None,
         row: dict[str, object] | None = None,
     ) -> float:
-        if not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        if not candidates or normalized_action not in candidates:
             return 0.0
         if features is None:
             return 0.0
-        return 1.0 if int(self.select(candidates, features, row or {})) == int(action) else 0.0
+        return 1.0 if normalize_action(self.select(candidates, features, row or {})) == normalized_action else 0.0
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features
 
-    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+    def update_batch(self, pending_updates: list[tuple[Action, float, list[float]]]) -> None:
         for a, r, f in pending_updates:
             self.update(a, r, f)
 
     def fit(self, train_df: pl.DataFrame) -> None:
         pending_updates = [
-            (int(r["show"]), float(r["reward"]), r["features_list"])
+            (normalize_action(r["show"]), float(r["reward"]), r["features_list"])
             for r in train_df.iter_rows(named=True)
         ]
         self.update_batch(pending_updates)
@@ -81,7 +92,7 @@ class RandomPolicy(BasePolicy):
         del features, row
         if not candidates:
             raise ValueError("Empty candidate set")
-        return int(self.rng.choice(candidates))
+        return normalize_action(self.rng.choice(candidates))
 
     def get_action_proba(
         self,
@@ -91,7 +102,7 @@ class RandomPolicy(BasePolicy):
         row: dict[str, object] | None = None,
     ) -> float:
         del features, row
-        if not candidates or int(action) not in candidates:
+        if not candidates or normalize_action(action) not in candidates:
             return 0.0
         return 1.0 / len(candidates)
 
@@ -119,12 +130,13 @@ class EpsilonGreedyPolicy(BasePolicy):
         row: dict[str, object] | None = None,
     ) -> float:
         del features, row
-        if not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        if not candidates or normalized_action not in candidates:
             return 0.0
         uniform_p = self.epsilon / len(candidates)
-        best_value = max(self.values.get(int(a), 0.0) for a in candidates)
-        greedy_actions = [int(a) for a in candidates if self.values.get(int(a), 0.0) == best_value]
-        exploit_p = (1.0 - self.epsilon) / max(1, len(greedy_actions)) if int(action) in greedy_actions else 0.0
+        best_value = max(self.values.get(normalize_action(a), 0.0) for a in candidates)
+        greedy_actions = [normalize_action(a) for a in candidates if self.values.get(normalize_action(a), 0.0) == best_value]
+        exploit_p = (1.0 - self.epsilon) / max(1, len(greedy_actions)) if normalized_action in greedy_actions else 0.0
         return uniform_p + exploit_p
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
@@ -160,13 +172,14 @@ class UCBPolicy(BasePolicy):
         row: dict[str, object] | None = None,
     ) -> float:
         del features, row
-        if not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        if not candidates or normalized_action not in candidates:
             return 0.0
-        untried = [int(a) for a in candidates if self.counts.get(int(a), 0) == 0]
+        untried = [normalize_action(a) for a in candidates if self.counts.get(normalize_action(a), 0) == 0]
         if untried:
-            return 1.0 if int(action) == untried[0] else 0.0
-        chosen = int(max(candidates, key=lambda a: self.values.get(int(a), 0.0) + math.sqrt(self.exploration * math.log(max(self.t, 1)) / max(1, self.counts.get(int(a), 1)))))
-        return 1.0 if int(action) == chosen else 0.0
+            return 1.0 if normalized_action == untried[0] else 0.0
+        chosen = normalize_action(max(candidates, key=lambda a: self.values.get(normalize_action(a), 0.0) + math.sqrt(self.exploration * math.log(max(self.t, 1)) / max(1, self.counts.get(normalize_action(a), 1)))))
+        return 1.0 if normalized_action == chosen else 0.0
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del features
@@ -201,15 +214,16 @@ class ThompsonSamplingPolicy(BasePolicy):
         import numpy as np
 
         del features, row
-        if not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        if not candidates or normalized_action not in candidates:
             return 0.0
         n_mc = 256
         rng = np.random.default_rng(42)
         wins = 0
-        target = int(action)
+        target = normalized_action
         for _ in range(n_mc):
             draws = {
-                int(a): float(rng.beta(self.alpha.get(int(a), self.alpha0), self.beta.get(int(a), self.beta0)))
+                normalize_action(a): float(rng.beta(self.alpha.get(normalize_action(a), self.alpha0), self.beta.get(normalize_action(a), self.beta0)))
                 for a in candidates
             }
             best = max(draws.items(), key=lambda kv: kv[1])[0]

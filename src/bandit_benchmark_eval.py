@@ -8,7 +8,7 @@ from typing import Callable, Literal
 import pandas as pd
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy, ScenarioConfig
+from bandit_benchmark_basic import Action, BasePolicy, ScenarioConfig, normalize_action
 
 try:
     from tqdm.auto import tqdm
@@ -26,10 +26,10 @@ def select_pretrain_data(train_df: pl.DataFrame, source: Literal["random", "all"
     raise ValueError(f"Unknown pretrain source: {source}")
 
 def build_expected_reward_estimator(train_df: pl.DataFrame) -> Callable[[dict[str, object], Action], float]:
-    sums: dict[int, float] = {}
-    counts: dict[int, int] = {}
+    sums: dict[Action, float] = {}
+    counts: dict[Action, int] = {}
     for row in train_df.iter_rows(named=True):
-        a = int(row["show"])
+        a = normalize_action(row["show"])
         r = float(row["reward"])
         sums[a] = sums.get(a, 0.0) + r
         counts[a] = counts.get(a, 0) + 1
@@ -44,23 +44,23 @@ def build_expected_reward_estimator(train_df: pl.DataFrame) -> Callable[[dict[st
 
     return estimate
 
-def build_random_action_ctr_stats(df: pl.DataFrame) -> tuple[dict[int, float], float]:
+def build_random_action_ctr_stats(df: pl.DataFrame) -> tuple[dict[Action, float], float]:
     random_df = df.filter(pl.col("policy") == "random") if "policy" in df.columns else df
-    sums: dict[int, float] = {}
-    counts: dict[int, int] = {}
+    sums: dict[Action, float] = {}
+    counts: dict[Action, int] = {}
     for row in random_df.iter_rows(named=True):
-        a = int(row["show"])
+        a = normalize_action(row["show"])
         r = float(row["reward"])
         sums[a] = sums.get(a, 0.0) + r
         counts[a] = counts.get(a, 0) + 1
 
-    ctr_by_action: dict[int, float] = {}
+    ctr_by_action: dict[Action, float] = {}
     for a, n in counts.items():
         ctr_by_action[a] = sums.get(a, 0.0) / n if n > 0 else 0.0
     max_ctr = max(ctr_by_action.values()) if ctr_by_action else 0.0
     return ctr_by_action, max_ctr
 
-def _finalize_action_ips_stats(action_ips_stats: dict[int, dict[str, float | int | bool]]) -> pd.DataFrame:
+def _finalize_action_ips_stats(action_ips_stats: dict[Action, dict[str, float | int | bool | Action]]) -> pd.DataFrame:
     if not action_ips_stats:
         return pd.DataFrame(
             columns=[
@@ -94,9 +94,9 @@ def evaluate_policy(
     env_reward: Callable[[dict[str, object], Action], float] | None = None,
     show_progress: bool = True,
     progress_desc: str = "evaluate",
-    ctr_by_action: dict[int, float] | None = None,
+    ctr_by_action: dict[Action, float] | None = None,
     max_random_ctr: float = 0.0,
-    initial_seen_actions: set[int] | None = None,
+    initial_seen_actions: set[Action] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_reward = 0.0
     ips_weighted_reward_sum = 0.0
@@ -108,7 +108,7 @@ def evaluate_policy(
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
     selected_action_rows: list[dict[str, object]] = []
-    action_ips_stats: dict[int, dict[str, float | int | bool]] = {}
+    action_ips_stats: dict[Action, dict[str, float | int | bool | Action]] = {}
 
     action_ctr = ctr_by_action or {}
     # Regret-only baseline fallback for unseen actions within candidate sets.
@@ -120,13 +120,13 @@ def evaluate_policy(
     if show_progress and tqdm is not None:
         pbar = tqdm(total=test_df.height, desc=progress_desc, leave=False, dynamic_ncols=True, mininterval=0.5)
 
-    pending_updates: list[tuple[int, float, list[float]]] = []
+    pending_updates: list[tuple[Action, float, list[float]]] = []
     next_progress_mark = progress_chunk
     update_chunk = max(1, int(total_steps * 0.025))
     next_step_update_mark = update_chunk
 
-    seen_actions_total: set[int] = set(initial_seen_actions or set())
-    current_day_actions: set[int] = set()
+    seen_actions_total: set[Action] = set(initial_seen_actions or set())
+    current_day_actions: set[Action] = set()
 
     test_rows = list(test_df.iter_rows(named=True))
     first_row_date = test_rows[0].get("date") if test_rows else None
@@ -173,7 +173,7 @@ def evaluate_policy(
 
             prev_date = current_date if current_date is not None else prev_date
 
-            action = int(actions_batch[offset])
+            action = normalize_action(actions_batch[offset])
             current_day_actions.add(action)
 
             selected_action_rows.append(
@@ -185,7 +185,8 @@ def evaluate_policy(
             )
 
             logged_reward = float(row["reward"])
-            logged_match = int(action == int(row["show"]))
+            logged_show = normalize_action(row["show"])
+            logged_match = int(action == logged_show)
             propensity = float(row.get("propensity", 0.0) or 0.0)
 
             ips_weight = (logged_match / propensity) if propensity > 0 else 0.0
@@ -193,16 +194,16 @@ def evaluate_policy(
             ips_weighted_reward_sum += ips_reward
             snips_weight_sum += ips_weight
             # Regret-only per-step baseline: max expected CTR among currently available actions.
-            candidate_ctrs = [action_ctr.get(int(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
+            candidate_ctrs = [action_ctr.get(normalize_action(a), max_random_ctr) for a in candidates] if candidates else [max_random_ctr]
             step_max_ctr = max(candidate_ctrs) if candidate_ctrs else max_random_ctr
             ips_step_regret = step_max_ctr - (logged_reward if logged_match else 0.0)
             cumulative_ips_regret += ips_step_regret
 
             action_ips_stat = action_ips_stats.setdefault(
-                int(row["show"]),
+                logged_show,
                 {
-                    "action": int(row["show"]),
-                    "in_train": bool(int(row["show"]) in (initial_seen_actions or set())),
+                    "action": logged_show,
+                    "in_train": bool(logged_show in (initial_seen_actions or set())),
                     "impressions": 0,
                     "ips_weighted_reward": 0.0,
                     "impressions_extrapolated": 0.0,
@@ -223,7 +224,7 @@ def evaluate_policy(
                 regret = step_max_ctr - reward
             else:
                 reward = float(env_reward(row, action))
-                replay_matches += int(action == int(row["show"]))
+                replay_matches += int(action == logged_show)
                 regret = step_max_ctr - reward
 
             total_reward += reward
@@ -344,7 +345,7 @@ def run_scenarios(
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
-            initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
+            initial_seen_actions = {normalize_action(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
             metrics_df, history_df, action_stats_df, action_daily_stats_df, action_ips_stats_df = evaluate_policy(
                 policy=policy,
@@ -404,7 +405,7 @@ def evaluate_policy_ips(
     update_frequency: Literal["daily", "step_2p5"] = "daily",
     show_progress: bool = True,
     progress_desc: str = "evaluate_ips",
-    initial_seen_actions: set[int] | None = None,
+    initial_seen_actions: set[Action] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ips_weighted_reward_sum = 0.0
     snips_weight_sum = 0.0
@@ -412,7 +413,7 @@ def evaluate_policy_ips(
     history_rows: list[dict[str, float | int]] = []
     action_stats_rows: list[dict[str, int]] = []
     selected_action_rows: list[dict[str, object]] = []
-    action_ips_stats: dict[int, dict[str, float | int | bool]] = {}
+    action_ips_stats: dict[Action, dict[str, float | int | bool | Action]] = {}
 
     total_steps = max(test_df.height, 1)
     progress_chunk = max(1, int(total_steps * 0.05))
@@ -421,13 +422,13 @@ def evaluate_policy_ips(
     if show_progress and tqdm is not None:
         pbar = tqdm(total=test_df.height, desc=progress_desc, leave=False, dynamic_ncols=True, mininterval=0.5)
 
-    pending_updates: list[tuple[int, float, list[float]]] = []
+    pending_updates: list[tuple[Action, float, list[float]]] = []
     next_progress_mark = progress_chunk
     update_chunk = max(1, int(total_steps * 0.025))
     next_step_update_mark = update_chunk
 
-    seen_actions_total: set[int] = set(initial_seen_actions or set())
-    current_day_actions: set[int] = set()
+    seen_actions_total: set[Action] = set(initial_seen_actions or set())
+    current_day_actions: set[Action] = set()
 
     test_rows = list(test_df.iter_rows(named=True))
     first_row_date = test_rows[0].get("date") if test_rows else None
@@ -443,7 +444,7 @@ def evaluate_policy_ips(
     for step, row in enumerate(test_rows, start=1):
         candidates = row["candidates_list"]
         features = row["features_list"]
-        logged_action = int(row["show"])
+        logged_action = normalize_action(row["show"])
         logged_reward = float(row["reward"])
         propensity = float(row.get("propensity", 0.0) or 0.0)
 
@@ -590,7 +591,7 @@ def run_scenarios_ips(
             if pretrain_df.height > 0:
                 policy.fit(pretrain_df)
 
-            initial_seen_actions = {int(r["show"]) for r in pretrain_df.iter_rows(named=True)}
+            initial_seen_actions = {normalize_action(r["show"]) for r in pretrain_df.iter_rows(named=True)}
 
             metrics_df, history_df, action_stats_df, action_daily_stats_df, action_ips_stats_df = evaluate_policy_ips(
                 policy=policy,
