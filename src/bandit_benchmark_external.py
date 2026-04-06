@@ -258,7 +258,7 @@ class CatBoostPolicy(BasePolicy):
         self._actions: list[int] = []
         self._a2i: dict[int, int] = {}
 
-    def _row_to_vector(self, features: list[float], action: int) -> list[float]:
+    def _row_to_vector(self, features: list[float], action: Action) -> list[float]:
         vec = list(features)
         one_hot = [0.0] * len(self._actions)
         idx = self._a2i.get(normalize_action(action))
@@ -316,11 +316,12 @@ class CatBoostPolicy(BasePolicy):
         best_action = candidates[0]
         best_score = -1.0
         for a in candidates:
-            vec = self._row_to_vector(features, int(a))
+            normalized_a = normalize_action(a)
+            vec = self._row_to_vector(features, normalized_a)
             p = float(self._model.predict_proba([vec])[0][1])
             if p > best_score:
                 best_score = p
-                best_action = int(a)
+                best_action = normalized_a
         return best_action
 
     def get_action_proba(
@@ -339,8 +340,9 @@ class CatBoostPolicy(BasePolicy):
             return 1.0 if normalize_action(action) == normalize_action(candidates[0]) else 0.0
         scores = {}
         for a in candidates:
-            vec = self._row_to_vector(features, int(a))
-            scores[int(a)] = float(self._model.predict_proba([vec])[0][1])
+            normalized_a = normalize_action(a)
+            vec = self._row_to_vector(features, normalized_a)
+            scores[normalized_a] = float(self._model.predict_proba([vec])[0][1])
         best = max(scores.items(), key=lambda kv: kv[1])[0]
         return 1.0 if normalized_action == normalize_action(best) else 0.0
 
