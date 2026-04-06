@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class ContextualBanditPlaceholder(BasePolicy):
@@ -21,7 +21,7 @@ class _ContextualTSLibPolicyBase(BasePolicy):
         self._a2i: dict[int, int] = {}
 
     def _build_action_index(self, rows: list[dict[str, object]]) -> None:
-        actions = sorted({int(r["show"]) for r in rows})
+        actions = sorted({normalize_action(r["show"]) for r in rows})
         self._actions = actions
         self._a2i = {a: i for i, a in enumerate(actions)}
 
@@ -50,14 +50,14 @@ class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
         self.r: list[int] = []
         self.f: list[list[float]] = []
 
-    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+    def update_batch(self, pending_updates: list[tuple[Action, float, list[float]]]) -> None:
         import numpy as np
         try:
             from contextualbandits.online import LogisticTS
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("contextualbandits is required for LogisticTSLibPolicy") from exc
 
-        new_actions = {int(a) for a, _, _ in pending_updates}
+        new_actions = {normalize_action(a) for a, _, _ in pending_updates}
         if not new_actions:
             raise ValueError("pending_updates contains no actions")
 
@@ -67,7 +67,8 @@ class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
                 self._actions.append(a)
 
         for a, r, f in pending_updates:
-            self.a.append(self._a2i[a])
+            normalized_a = normalize_action(a)
+            self.a.append(self._a2i[normalized_a])
             self.r.append(int(float(r) > 0.0))
             self.f.append(f)
 
@@ -145,14 +146,14 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
         self.r: list[int] = []
         self.f: list[list[float]] = []
 
-    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+    def update_batch(self, pending_updates: list[tuple[Action, float, list[float]]]) -> None:
         import numpy as np
         try:
             from contextualbandits.online import PartitionedTS
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("contextualbandits is required for PartitionedTSLibPolicy") from exc
 
-        new_actions = {int(a) for a, _, _ in pending_updates}
+        new_actions = {normalize_action(a) for a, _, _ in pending_updates}
         if not new_actions:
             raise ValueError("pending_updates contains no actions")
 
@@ -162,7 +163,8 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
                 self._actions.append(a)
 
         for a, r, f in pending_updates:
-            self.a.append(self._a2i[a])
+            normalized_a = normalize_action(a)
+            self.a.append(self._a2i[normalized_a])
             self.r.append(int(float(r) > 0.0))
             self.f.append(f)
 
@@ -258,10 +260,10 @@ class CatBoostPolicy(BasePolicy):
         self._actions: list[int] = []
         self._a2i: dict[int, int] = {}
 
-    def _row_to_vector(self, features: list[float], action: int) -> list[float]:
+    def _row_to_vector(self, features: list[float], action: Action) -> list[float]:
         vec = list(features)
         one_hot = [0.0] * len(self._actions)
-        idx = self._a2i.get(int(action))
+        idx = self._a2i.get(normalize_action(action))
         if idx is not None:
             one_hot[idx] = 1.0
         return vec + one_hot
@@ -278,14 +280,14 @@ class CatBoostPolicy(BasePolicy):
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("catboost is required for CatBoostPolicy") from exc
 
-        actions = sorted({int(r["show"]) for r in train_df.iter_rows(named=True)})
+        actions = sorted({normalize_action(r["show"]) for r in train_df.iter_rows(named=True)})
         self._actions = actions
         self._a2i = {a: i for i, a in enumerate(actions)}
 
         X: list[list[float]] = []
         y: list[int] = []
         for row in train_df.iter_rows(named=True):
-            action = int(row["show"])
+            action = normalize_action(row["show"])
             features = row["features_list"]
             X.append(self._row_to_vector(features, action))
             y.append(int(float(row["reward"]) > 0.0))
@@ -316,11 +318,12 @@ class CatBoostPolicy(BasePolicy):
         best_action = candidates[0]
         best_score = -1.0
         for a in candidates:
-            vec = self._row_to_vector(features, int(a))
+            normalized_a = normalize_action(a)
+            vec = self._row_to_vector(features, normalized_a)
             p = float(self._model.predict_proba([vec])[0][1])
             if p > best_score:
                 best_score = p
-                best_action = int(a)
+                best_action = normalized_a
         return best_action
 
     def get_action_proba(
@@ -331,16 +334,19 @@ class CatBoostPolicy(BasePolicy):
         row: dict[str, object] | None = None,
     ) -> float:
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         if self._model is None:
-            return 1.0 if int(action) == int(candidates[0]) else 0.0
+            return 1.0 if normalize_action(action) == normalize_action(candidates[0]) else 0.0
         scores = {}
         for a in candidates:
-            vec = self._row_to_vector(features, int(a))
-            scores[int(a)] = float(self._model.predict_proba([vec])[0][1])
+            normalized_a = normalize_action(a)
+            vec = self._row_to_vector(features, normalized_a)
+            scores[normalized_a] = float(self._model.predict_proba([vec])[0][1])
         best = max(scores.items(), key=lambda kv: kv[1])[0]
-        return 1.0 if int(action) == best else 0.0
+        return 1.0 if normalized_action == normalize_action(best) else 0.0
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features

@@ -8,10 +8,14 @@ import polars as pl
 NULL_FEATURE_FILL = 0.0
 
 
-def _parse_candidates(raw: str) -> list[int]:
+def _normalize_action_token(raw: object) -> str:
+    return str(raw)
+
+
+def _parse_candidates(raw: str) -> list[str]:
     if raw is None or raw == "":
         return []
-    return [int(x) for x in str(raw).split("\\t") if str(x) != ""]
+    return [_normalize_action_token(x) for x in str(raw).split("\\t") if str(x) != ""]
 
 
 def _parse_features(raw: str) -> list[float]:
@@ -39,10 +43,10 @@ def preprocess_bandit_dataframe(df: pl.DataFrame) -> pl.DataFrame:
 
     prepared = df.with_columns(
         [
-            pl.col("show").cast(pl.Int64),
+            pl.col("show").map_elements(_normalize_action_token, return_dtype=pl.String).alias("show"),
             pl.col("reward"),
             pl.col("date").str.to_datetime(strict=False),
-            pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.Int64)).alias("candidates_list"),
+            pl.col("candidates").map_elements(_parse_candidates, return_dtype=pl.List(pl.String)).alias("candidates_list"),
             pl.col("features").map_elements(_parse_features, return_dtype=pl.List(pl.Float64)).alias("features_list"),
         ]
     )
@@ -118,14 +122,19 @@ def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.
 
     A row is preserved only if every action in `candidates_list` exists in train `show` actions.
     """
-    train_actions = {int(r["show"]) for r in train_df.iter_rows(named=True)}
+    train_actions = {str(r["show"]) for r in train_df.iter_rows(named=True)}
     if not train_actions:
+        return test_df.clear()
+    if test_df.is_empty():
         return test_df.clear()
 
     keep_mask: list[bool] = []
     for row in test_df.iter_rows(named=True):
         candidates = row.get("candidates_list") or []
-        keep_mask.append(all(int(a) in train_actions for a in candidates))
+        keep_mask.append(all(str(a) in train_actions for a in candidates))
+
+    if not keep_mask:
+        return test_df.clear()
 
     return test_df.filter(pl.Series("_keep", keep_mask))
 

@@ -6,7 +6,7 @@ import math
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class ActionTreeThompsonModel:
@@ -222,7 +222,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         self.action_history = {}
 
         for row in rows:
-            action = int(row["show"])
+            action = normalize_action(row["show"])
             features = [float(v) for v in row["features_list"]]
             reward = float(row["reward"])
             self.action_history.setdefault(action, []).append((features, reward, action))
@@ -242,12 +242,12 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             raise ValueError("Empty candidate set")
 
         x = np.asarray(features, dtype=float)
-        best_action = int(candidates[0])
+        best_action = normalize_action(candidates[0])
         best_score = -1.0
         rng = np.random.default_rng(self.random_state)
 
         for candidate in candidates:
-            action = int(candidate)
+            action = normalize_action(candidate)
             model = self.action_models.get(action)
             if model is None or model.tree is None:
                 score = float(rng.beta(self.alpha0, self.beta0))
@@ -268,20 +268,22 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         import numpy as np
 
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
 
         x = np.asarray(features, dtype=float)
         rng = np.random.default_rng(self.random_state)
-        target = int(action)
+        target = normalized_action
         wins = 0
         n_mc = 128
 
         for _ in range(n_mc):
-            best_action = int(candidates[0])
+            best_action = normalize_action(candidates[0])
             best_score = -1.0
             for candidate in candidates:
-                aa = int(candidate)
+                aa = normalize_action(candidate)
                 model = self.action_models.get(aa)
                 if model is None or model.tree is None:
                     score = float(rng.beta(self.alpha0, self.beta0))
@@ -300,14 +302,15 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -337,14 +340,15 @@ class TreeThompsonSamplingPolicyUpdateV2(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -389,7 +393,7 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
@@ -399,9 +403,10 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             self._refit_all_models()
             return
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -431,7 +436,7 @@ class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))

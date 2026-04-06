@@ -8,7 +8,7 @@ from typing import Literal
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 from bandit_benchmark_tree import TreeThompsonSamplingPolicy
 
 
@@ -434,11 +434,11 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
             split_criterion=self.split_criterion,
         )
 
-    def _parse_update(self, update) -> tuple[int, float, list[float]]:
+    def _parse_update(self, update) -> tuple[Action, float, list[float]]:
         if len(update) != 3:
             raise ValueError("Updates must be (action, reward, features)")
         action, reward, features = update
-        return int(action), float(reward), [float(v) for v in features]
+        return normalize_action(action), float(reward), [float(v) for v in features]
 
     def fit(self, train_df: pl.DataFrame) -> None:
         import numpy as np
@@ -448,7 +448,7 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
         self.action_history = {}
 
         for row in rows:
-            action = int(row["show"])
+            action = normalize_action(row["show"])
             features = [float(v) for v in row["features_list"]]
             reward = float(row["reward"])
             self.action_history.setdefault(action, []).append((features, reward, action))

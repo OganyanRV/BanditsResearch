@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Literal
+import zlib
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class OnlineLogisticRegression:
@@ -117,14 +118,15 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self.seed = seed
 
         self._d: int | None = None
-        self._models: dict[int, OnlineLogisticRegression] = {}
+        self._models: dict[Action, OnlineLogisticRegression] = {}
 
-    def _get_model(self, a: int) -> OnlineLogisticRegression:
+    def _get_model(self, a: Action) -> OnlineLogisticRegression:
         m = self._models.get(a)
         if m is None:
             if self._d is None:
                 raise ValueError("Feature dimension is unknown; call update/select with features first")
-            arm_seed = None if self.seed is None else (self.seed + 1000003 * a)
+            action_offset = int(zlib.crc32(normalize_action(a).encode("utf-8")))
+            arm_seed = None if self.seed is None else (int(self.seed) + action_offset)
             m = OnlineLogisticRegression(self.lambda_, self.alpha, self._d, seed=arm_seed)
             self._models[a] = m
         return m
@@ -143,7 +145,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if features is None:
             return
         self._ensure_dim(features)
-        a = int(action)
+        a = normalize_action(action)
         model = self._get_model(a)
 
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
@@ -157,9 +159,9 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             return
 
         self._ensure_dim(pending_updates[0][2])
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, r, f in pending_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(f, dtype=np.float64)
             y = 1 if float(r) > 0 else -1
             if arm not in by_arm:
@@ -177,16 +179,16 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         import numpy as np
 
         pending_updates = [
-            (int(r["show"]), float(r["reward"]), list(r["features_list"]))
+            (normalize_action(r["show"]), float(r["reward"]), list(r["features_list"]))
             for r in train_df.iter_rows(named=True)
         ]
         if not pending_updates:
             return
 
         self._ensure_dim(pending_updates[0][2])
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, r, f in pending_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(f, dtype=np.float64)
             y = 1 if float(r) > 0 else -1
             if arm not in by_arm:
@@ -209,11 +211,11 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self._ensure_dim(features)
 
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
-        best_a = int(candidates[0])
+        best_a = normalize_action(candidates[0])
         best_score = -np.inf
 
         for a_raw in candidates:
-            a = int(a_raw)
+            a = normalize_action(a_raw)
             model = self._get_model(a)
             p = float(model.predict_proba(x, mode="sample")[0, 1])
             if p > best_score:
@@ -232,18 +234,20 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         import numpy as np
 
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         self._ensure_dim(features)
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
         n_mc = 128
         wins = 0
-        target = int(action)
+        target = normalized_action
         for _ in range(n_mc):
-            best_a = int(candidates[0])
+            best_a = normalize_action(candidates[0])
             best_score = -np.inf
             for a_raw in candidates:
-                a = int(a_raw)
+                a = normalize_action(a_raw)
                 model = self._get_model(a)
                 p = float(model.predict_proba(x, mode="sample")[0, 1])
                 if p > best_score:
@@ -445,7 +449,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if not rows:
             return
 
-        actions = sorted({int(r["show"]) for r in rows})
+        actions = sorted({normalize_action(r["show"]) for r in rows})
         self._action_to_idx = {a: i for i, a in enumerate(actions)}
 
         mode = self.encoder_train_data_mode
@@ -471,7 +475,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             reg_rows = ordered_rows[split:] if split < n_rows else encoder_rows
 
         X_enc = np.asarray([list(r["features_list"]) for r in encoder_rows], dtype=np.float32)
-        a_idx_enc = np.asarray([self._action_to_idx[int(r["show"])] for r in encoder_rows], dtype=np.int64)
+        a_idx_enc = np.asarray([self._action_to_idx[normalize_action(r["show"])] for r in encoder_rows], dtype=np.int64)
         y_enc = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in encoder_rows], dtype=np.float32)
 
         if self._provided_encoder is not None:
@@ -497,13 +501,13 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         X_reg = np.asarray([list(r["features_list"]) for r in reg_rows], dtype=np.float32)
         Z_reg = self._encoder.transform(X_reg)
         transformed_updates = [
-            (int(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
+            (normalize_action(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
             for i, r in enumerate(reg_rows)
         ]
 
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, rew, feat in transformed_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(feat, dtype=np.float64)
             yy = 1 if float(rew) > 0 else -1
             if arm not in by_arm:
@@ -537,7 +541,9 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         features: list[float] | None = None,
         row: dict[str, object] | None = None,
     ) -> float:
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         transformed = self._transform_features(features)
         return self._base.get_action_proba(candidates, action, transformed, row)
