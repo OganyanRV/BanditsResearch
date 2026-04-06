@@ -125,11 +125,16 @@ def filter_test_by_train_candidate_coverage(train_df: pl.DataFrame, test_df: pl.
     train_actions = {str(r["show"]) for r in train_df.iter_rows(named=True)}
     if not train_actions:
         return test_df.clear()
+    if test_df.is_empty():
+        return test_df.clear()
 
     keep_mask: list[bool] = []
     for row in test_df.iter_rows(named=True):
         candidates = row.get("candidates_list") or []
         keep_mask.append(all(str(a) in train_actions for a in candidates))
+
+    if not keep_mask:
+        return test_df.clear()
 
     return test_df.filter(pl.Series("_keep", keep_mask))
 
