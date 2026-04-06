@@ -242,7 +242,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             raise ValueError("Empty candidate set")
 
         x = np.asarray(features, dtype=float)
-        best_action = int(candidates[0])
+        best_action = normalize_action(candidates[0])
         best_score = -1.0
         rng = np.random.default_rng(self.random_state)
 
@@ -278,7 +278,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         n_mc = 128
 
         for _ in range(n_mc):
-            best_action = int(candidates[0])
+            best_action = normalize_action(candidates[0])
             best_score = -1.0
             for candidate in candidates:
                 aa = int(candidate)

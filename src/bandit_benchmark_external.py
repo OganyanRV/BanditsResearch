@@ -334,7 +334,7 @@ class CatBoostPolicy(BasePolicy):
         if features is None or not candidates or int(action) not in candidates:
             return 0.0
         if self._model is None:
-            return 1.0 if int(action) == int(candidates[0]) else 0.0
+            return 1.0 if normalize_action(action) == normalize_action(candidates[0]) else 0.0
         scores = {}
         for a in candidates:
             vec = self._row_to_vector(features, int(a))

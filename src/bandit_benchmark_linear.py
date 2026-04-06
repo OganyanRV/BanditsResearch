@@ -209,7 +209,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self._ensure_dim(features)
 
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
-        best_a = int(candidates[0])
+        best_a = normalize_action(candidates[0])
         best_score = -np.inf
 
         for a_raw in candidates:
@@ -240,7 +240,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         wins = 0
         target = int(action)
         for _ in range(n_mc):
-            best_a = int(candidates[0])
+            best_a = normalize_action(candidates[0])
             best_score = -np.inf
             for a_raw in candidates:
                 a = int(a_raw)
