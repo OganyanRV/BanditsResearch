@@ -50,14 +50,14 @@ class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
         self.r: list[int] = []
         self.f: list[list[float]] = []
 
-    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+    def update_batch(self, pending_updates: list[tuple[Action, float, list[float]]]) -> None:
         import numpy as np
         try:
             from contextualbandits.online import LogisticTS
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("contextualbandits is required for LogisticTSLibPolicy") from exc
 
-        new_actions = {int(a) for a, _, _ in pending_updates}
+        new_actions = {normalize_action(a) for a, _, _ in pending_updates}
         if not new_actions:
             raise ValueError("pending_updates contains no actions")
 
@@ -67,7 +67,8 @@ class LogisticTSLibPolicy(_ContextualTSLibPolicyBase):
                 self._actions.append(a)
 
         for a, r, f in pending_updates:
-            self.a.append(self._a2i[a])
+            normalized_a = normalize_action(a)
+            self.a.append(self._a2i[normalized_a])
             self.r.append(int(float(r) > 0.0))
             self.f.append(f)
 
@@ -145,14 +146,14 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
         self.r: list[int] = []
         self.f: list[list[float]] = []
 
-    def update_batch(self, pending_updates: list[tuple[int, float, list[float]]]) -> None:
+    def update_batch(self, pending_updates: list[tuple[Action, float, list[float]]]) -> None:
         import numpy as np
         try:
             from contextualbandits.online import PartitionedTS
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("contextualbandits is required for PartitionedTSLibPolicy") from exc
 
-        new_actions = {int(a) for a, _, _ in pending_updates}
+        new_actions = {normalize_action(a) for a, _, _ in pending_updates}
         if not new_actions:
             raise ValueError("pending_updates contains no actions")
 
@@ -162,7 +163,8 @@ class PartitionedTSLibPolicy(_ContextualTSLibPolicyBase):
                 self._actions.append(a)
 
         for a, r, f in pending_updates:
-            self.a.append(self._a2i[a])
+            normalized_a = normalize_action(a)
+            self.a.append(self._a2i[normalized_a])
             self.r.append(int(float(r) > 0.0))
             self.f.append(f)
 
