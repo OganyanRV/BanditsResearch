@@ -157,9 +157,9 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             return
 
         self._ensure_dim(pending_updates[0][2])
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, r, f in pending_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(f, dtype=np.float64)
             y = 1 if float(r) > 0 else -1
             if arm not in by_arm:
@@ -184,9 +184,9 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             return
 
         self._ensure_dim(pending_updates[0][2])
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, r, f in pending_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(f, dtype=np.float64)
             y = 1 if float(r) > 0 else -1
             if arm not in by_arm:
@@ -503,9 +503,9 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             for i, r in enumerate(reg_rows)
         ]
 
-        by_arm: dict[int, tuple[list, list[int]]] = {}
+        by_arm: dict[Action, tuple[list, list[int]]] = {}
         for a, rew, feat in transformed_updates:
-            arm = int(a)
+            arm = normalize_action(a)
             x = np.asarray(feat, dtype=np.float64)
             yy = 1 if float(rew) > 0 else -1
             if arm not in by_arm:
