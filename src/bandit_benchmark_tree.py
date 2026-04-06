@@ -247,7 +247,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         rng = np.random.default_rng(self.random_state)
 
         for candidate in candidates:
-            action = int(candidate)
+            action = normalize_action(candidate)
             model = self.action_models.get(action)
             if model is None or model.tree is None:
                 score = float(rng.beta(self.alpha0, self.beta0))
@@ -281,7 +281,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             best_action = normalize_action(candidates[0])
             best_score = -1.0
             for candidate in candidates:
-                aa = int(candidate)
+                aa = normalize_action(candidate)
                 model = self.action_models.get(aa)
                 if model is None or model.tree is None:
                     score = float(rng.beta(self.alpha0, self.beta0))

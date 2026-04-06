@@ -213,7 +213,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         best_score = -np.inf
 
         for a_raw in candidates:
-            a = int(a_raw)
+            a = normalize_action(a_raw)
             model = self._get_model(a)
             p = float(model.predict_proba(x, mode="sample")[0, 1])
             if p > best_score:
@@ -243,7 +243,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             best_a = normalize_action(candidates[0])
             best_score = -np.inf
             for a_raw in candidates:
-                a = int(a_raw)
+                a = normalize_action(a_raw)
                 model = self._get_model(a)
                 p = float(model.predict_proba(x, mode="sample")[0, 1])
                 if p > best_score:
