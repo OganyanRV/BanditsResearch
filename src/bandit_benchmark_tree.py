@@ -300,14 +300,15 @@ class TreeThompsonSamplingPolicy(BasePolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -337,14 +338,15 @@ class TreeThompsonSamplingPolicyUpdateV2(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -389,7 +391,7 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
@@ -399,9 +401,10 @@ class TreeThompsonSamplingPolicyUpdateV3(TreeThompsonSamplingPolicy):
             self._refit_all_models()
             return
 
-        grouped: dict[int, list[tuple[list[float], float, int]]] = {}
+        grouped: dict[Action, list[tuple[list[float], float, Action]]] = {}
         for action, reward, features in pending_updates:
-            grouped.setdefault(int(action), []).append(([float(v) for v in features], float(reward), int(action)))
+            aa = normalize_action(action)
+            grouped.setdefault(aa, []).append(([float(v) for v in features], float(reward), aa))
 
         for action, items in grouped.items():
             X = np.asarray([it[0] for it in items], dtype=float)
@@ -431,7 +434,7 @@ class TreeThompsonSamplingPolicyDummyRefit(TreeThompsonSamplingPolicy):
             return
 
         for action, reward, features in pending_updates:
-            aa = int(action)
+            aa = normalize_action(action)
             ff = [float(v) for v in features]
             rr = float(reward)
             self.action_history.setdefault(aa, []).append((ff, rr, aa))
