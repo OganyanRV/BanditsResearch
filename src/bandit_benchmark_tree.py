@@ -268,12 +268,14 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         import numpy as np
 
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
 
         x = np.asarray(features, dtype=float)
         rng = np.random.default_rng(self.random_state)
-        target = int(action)
+        target = normalized_action
         wins = 0
         n_mc = 128
 

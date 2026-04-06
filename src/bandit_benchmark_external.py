@@ -261,7 +261,7 @@ class CatBoostPolicy(BasePolicy):
     def _row_to_vector(self, features: list[float], action: int) -> list[float]:
         vec = list(features)
         one_hot = [0.0] * len(self._actions)
-        idx = self._a2i.get(int(action))
+        idx = self._a2i.get(normalize_action(action))
         if idx is not None:
             one_hot[idx] = 1.0
         return vec + one_hot
@@ -331,7 +331,9 @@ class CatBoostPolicy(BasePolicy):
         row: dict[str, object] | None = None,
     ) -> float:
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         if self._model is None:
             return 1.0 if normalize_action(action) == normalize_action(candidates[0]) else 0.0
@@ -340,7 +342,7 @@ class CatBoostPolicy(BasePolicy):
             vec = self._row_to_vector(features, int(a))
             scores[int(a)] = float(self._model.predict_proba([vec])[0][1])
         best = max(scores.items(), key=lambda kv: kv[1])[0]
-        return 1.0 if int(action) == best else 0.0
+        return 1.0 if normalized_action == normalize_action(best) else 0.0
 
     def update(self, action: Action, reward: float, features: list[float] | None = None) -> None:
         del action, reward, features

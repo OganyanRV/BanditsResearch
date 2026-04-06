@@ -143,7 +143,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if features is None:
             return
         self._ensure_dim(features)
-        a = int(action)
+        a = normalize_action(action)
         model = self._get_model(a)
 
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
@@ -232,13 +232,15 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         import numpy as np
 
         del row
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         self._ensure_dim(features)
         x = np.asarray(features, dtype=np.float64).reshape(1, -1)
         n_mc = 128
         wins = 0
-        target = int(action)
+        target = normalized_action
         for _ in range(n_mc):
             best_a = normalize_action(candidates[0])
             best_score = -np.inf
@@ -537,7 +539,9 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         features: list[float] | None = None,
         row: dict[str, object] | None = None,
     ) -> float:
-        if features is None or not candidates or int(action) not in candidates:
+        normalized_action = normalize_action(action)
+        normalized_candidates = {normalize_action(a) for a in candidates}
+        if features is None or not candidates or normalized_action not in normalized_candidates:
             return 0.0
         transformed = self._transform_features(features)
         return self._base.get_action_proba(candidates, action, transformed, row)
