@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class ContextualBanditPlaceholder(BasePolicy):
@@ -21,7 +21,7 @@ class _ContextualTSLibPolicyBase(BasePolicy):
         self._a2i: dict[int, int] = {}
 
     def _build_action_index(self, rows: list[dict[str, object]]) -> None:
-        actions = sorted({int(r["show"]) for r in rows})
+        actions = sorted({normalize_action(r["show"]) for r in rows})
         self._actions = actions
         self._a2i = {a: i for i, a in enumerate(actions)}
 
@@ -278,14 +278,14 @@ class CatBoostPolicy(BasePolicy):
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("catboost is required for CatBoostPolicy") from exc
 
-        actions = sorted({int(r["show"]) for r in train_df.iter_rows(named=True)})
+        actions = sorted({normalize_action(r["show"]) for r in train_df.iter_rows(named=True)})
         self._actions = actions
         self._a2i = {a: i for i, a in enumerate(actions)}
 
         X: list[list[float]] = []
         y: list[int] = []
         for row in train_df.iter_rows(named=True):
-            action = int(row["show"])
+            action = normalize_action(row["show"])
             features = row["features_list"]
             X.append(self._row_to_vector(features, action))
             y.append(int(float(row["reward"]) > 0.0))

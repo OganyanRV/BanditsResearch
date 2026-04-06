@@ -6,7 +6,7 @@ import math
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class ActionTreeThompsonModel:
@@ -222,7 +222,7 @@ class TreeThompsonSamplingPolicy(BasePolicy):
         self.action_history = {}
 
         for row in rows:
-            action = int(row["show"])
+            action = normalize_action(row["show"])
             features = [float(v) for v in row["features_list"]]
             reward = float(row["reward"])
             self.action_history.setdefault(action, []).append((features, reward, action))

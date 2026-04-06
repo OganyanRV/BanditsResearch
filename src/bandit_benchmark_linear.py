@@ -6,7 +6,7 @@ from typing import Literal
 
 import polars as pl
 
-from bandit_benchmark_basic import Action, BasePolicy
+from bandit_benchmark_basic import Action, BasePolicy, normalize_action
 
 
 class OnlineLogisticRegression:
@@ -177,7 +177,7 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         import numpy as np
 
         pending_updates = [
-            (int(r["show"]), float(r["reward"]), list(r["features_list"]))
+            (normalize_action(r["show"]), float(r["reward"]), list(r["features_list"]))
             for r in train_df.iter_rows(named=True)
         ]
         if not pending_updates:
@@ -445,7 +445,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         if not rows:
             return
 
-        actions = sorted({int(r["show"]) for r in rows})
+        actions = sorted({normalize_action(r["show"]) for r in rows})
         self._action_to_idx = {a: i for i, a in enumerate(actions)}
 
         mode = self.encoder_train_data_mode
@@ -471,7 +471,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
             reg_rows = ordered_rows[split:] if split < n_rows else encoder_rows
 
         X_enc = np.asarray([list(r["features_list"]) for r in encoder_rows], dtype=np.float32)
-        a_idx_enc = np.asarray([self._action_to_idx[int(r["show"])] for r in encoder_rows], dtype=np.int64)
+        a_idx_enc = np.asarray([self._action_to_idx[normalize_action(r["show"])] for r in encoder_rows], dtype=np.int64)
         y_enc = np.asarray([1.0 if float(r["reward"]) > 0 else 0.0 for r in encoder_rows], dtype=np.float32)
 
         if self._provided_encoder is not None:
@@ -497,7 +497,7 @@ class NeuralLaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         X_reg = np.asarray([list(r["features_list"]) for r in reg_rows], dtype=np.float32)
         Z_reg = self._encoder.transform(X_reg)
         transformed_updates = [
-            (int(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
+            (normalize_action(r["show"]), float(r["reward"]), [float(v) for v in Z_reg[i].tolist()])
             for i, r in enumerate(reg_rows)
         ]
 
