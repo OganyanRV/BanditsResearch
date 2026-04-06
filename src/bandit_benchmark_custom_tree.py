@@ -434,11 +434,11 @@ class CustomTreeThompsonSamplingPolicy(TreeThompsonSamplingPolicy):
             split_criterion=self.split_criterion,
         )
 
-    def _parse_update(self, update) -> tuple[int, float, list[float]]:
+    def _parse_update(self, update) -> tuple[Action, float, list[float]]:
         if len(update) != 3:
             raise ValueError("Updates must be (action, reward, features)")
         action, reward, features = update
-        return int(action), float(reward), [float(v) for v in features]
+        return normalize_action(action), float(reward), [float(v) for v in features]
 
     def fit(self, train_df: pl.DataFrame) -> None:
         import numpy as np
