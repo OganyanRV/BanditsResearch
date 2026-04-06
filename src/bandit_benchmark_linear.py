@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+import zlib
 
 import polars as pl
 
@@ -117,14 +118,15 @@ class LaplaceThompsonViaBayesianLogRegPolicy(BasePolicy):
         self.seed = seed
 
         self._d: int | None = None
-        self._models: dict[int, OnlineLogisticRegression] = {}
+        self._models: dict[Action, OnlineLogisticRegression] = {}
 
-    def _get_model(self, a: int) -> OnlineLogisticRegression:
+    def _get_model(self, a: Action) -> OnlineLogisticRegression:
         m = self._models.get(a)
         if m is None:
             if self._d is None:
                 raise ValueError("Feature dimension is unknown; call update/select with features first")
-            arm_seed = None if self.seed is None else (self.seed + 1000003 * a)
+            action_offset = int(zlib.crc32(normalize_action(a).encode("utf-8")))
+            arm_seed = None if self.seed is None else (int(self.seed) + action_offset)
             m = OnlineLogisticRegression(self.lambda_, self.alpha, self._d, seed=arm_seed)
             self._models[a] = m
         return m
